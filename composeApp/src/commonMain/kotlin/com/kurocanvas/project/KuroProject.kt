@@ -52,11 +52,21 @@ data class AddStoryboardPanel(
     override val actor: String = "user"
 ) : KuroOperation
 
+data class UndoAddedStoryboardPanel(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
 enum class OperationStatus {
     COMMITTED,
     REVISION_CONFLICT,
     WRONG_PROJECT,
-    DUPLICATE_OPERATION
+    DUPLICATE_OPERATION,
+    INVALID_UNDO_TARGET,
+    ALREADY_UNDONE
 }
 
 data class KuroOperationResult(
@@ -103,6 +113,7 @@ class KuroOperationBroker {
 
         return when (operation) {
             is AddStoryboardPanel -> addPanel(current, operation)
+            is UndoAddedStoryboardPanel -> undoAddedPanel(current, operation)
         }
     }
 
@@ -134,6 +145,57 @@ class KuroOperationBroker {
             project = next,
             message = "Storyboard panel committed to project state.",
             affectedObjectId = panel.id
+        )
+    }
+
+    private fun undoAddedPanel(
+        current: KuroProjectState,
+        operation: UndoAddedStoryboardPanel
+    ): KuroOperationResult {
+        val targetEvent = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (targetEvent == null || targetEvent.action != "add_storyboard_panel") {
+            return KuroOperationResult(
+                status = OperationStatus.INVALID_UNDO_TARGET,
+                project = current,
+                message = "Only a committed panel-add operation can be undone by this command."
+            )
+        }
+
+        val panelId = targetEvent.targetId
+        if (current.auditLog.any { it.action == "undo_add_storyboard_panel" && it.targetId == panelId }) {
+            return KuroOperationResult(
+                status = OperationStatus.ALREADY_UNDONE,
+                project = current,
+                message = "This panel-add operation has already been undone."
+            )
+        }
+        if (current.panels.none { it.id == panelId }) {
+            return KuroOperationResult(
+                status = OperationStatus.INVALID_UNDO_TARGET,
+                project = current,
+                message = "The target panel no longer exists in the current project state."
+            )
+        }
+
+        val newRevision = current.revision + 1
+        val next = current.copy(
+            revision = newRevision,
+            panels = current.panels.filterNot { it.id == panelId }
+                .mapIndexed { index, panel -> panel.copy(order = index) },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = newRevision,
+                actor = operation.actor,
+                action = "undo_add_storyboard_panel",
+                targetId = panelId,
+                summary = "Undid creation of $panelId."
+            )
+        )
+        return KuroOperationResult(
+            status = OperationStatus.COMMITTED,
+            project = next,
+            message = "Panel creation was undone and retained in the audit log.",
+            affectedObjectId = panelId
         )
     }
 }
