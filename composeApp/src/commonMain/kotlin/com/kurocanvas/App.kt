@@ -218,6 +218,7 @@ private fun CreateWorkspace(
     onBrushSize: (Float) -> Unit,
     onStroke: (InkStroke) -> Unit
 ) {
+    var livePoints by remember { mutableStateOf(emptyList<Offset>()) }
     Column(Modifier.fillMaxSize().background(Ink)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -227,7 +228,7 @@ private fun CreateWorkspace(
             StatusPill("Not saved", Amber)
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf("Brush", "Eraser", "Select").forEach { label -> ToolChip(label, label == tool) { onTool(label) } }
+            listOf("Brush", "Eraser").forEach { label -> ToolChip(label, label == tool) { onTool(label) } }
             Spacer(Modifier.weight(1f))
             Text("STROKES " + strokes.size, color = MutedText, fontSize = 10.sp)
         }
@@ -240,6 +241,8 @@ private fun CreateWorkspace(
                 brushSize = brushSize,
                 panelCount = demoPanels,
                 eraser = tool == "Eraser",
+                livePoints = livePoints,
+                onLivePoints = { livePoints = it },
                 onStroke = onStroke
             )
             Column(Modifier.align(Alignment.TopStart).padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -277,13 +280,18 @@ private fun SketchCanvas(
     brushSize: Float,
     panelCount: Int,
     eraser: Boolean,
+    livePoints: List<Offset>,
+    onLivePoints: (List<Offset>) -> Unit,
     onStroke: (InkStroke) -> Unit
 ) {
     Canvas(
         modifier.background(Color(0xFF111522)).pointerInput(brushSize, eraser) {
             var draft = emptyList<Offset>()
             detectDragGestures(
-                onDragStart = { point -> draft = listOf(point) },
+                onDragStart = { point ->
+                    draft = listOf(point)
+                    onLivePoints(draft)
+                },
                 onDragEnd = {
                     if (draft.size > 1) onStroke(
                         InkStroke(
@@ -293,11 +301,16 @@ private fun SketchCanvas(
                         )
                     )
                     draft = emptyList()
+                    onLivePoints(emptyList())
                 },
-                onDragCancel = { draft = emptyList() },
+                onDragCancel = {
+                    draft = emptyList()
+                    onLivePoints(emptyList())
+                },
                 onDrag = { change, _ ->
                     change.consume()
                     draft = draft + change.position
+                    onLivePoints(draft)
                 }
             )
         }
@@ -324,13 +337,18 @@ private fun SketchCanvas(
                 )
             }
         }
-        strokes.forEach { stroke ->
+        val previewColor = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B)
+        val visibleStrokes = if (livePoints.isNotEmpty()) {
+            strokes + InkStroke(livePoints, previewColor, if (eraser) brushSize * 3f else brushSize)
+        } else {
+            strokes
+        }
+        visibleStrokes.forEach { stroke ->
             if (stroke.points.size == 1) drawCircle(stroke.color, 2.2f, stroke.points.first())
             for (pointIndex in 0 until stroke.points.lastIndex) {
                 drawLine(stroke.color, stroke.points[pointIndex], stroke.points[pointIndex + 1], stroke.width, StrokeCap.Round)
             }
         }
-        // The initial shell renders the input gesture preview only after the stroke commits.
     }
 }
 
