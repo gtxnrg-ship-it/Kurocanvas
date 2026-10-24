@@ -10,23 +10,31 @@ kotlin {
     jvm("desktop")
 
     sourceSets {
-        commonMain.dependencies {
-            implementation(compose.runtime)
-            implementation(compose.foundation)
-            implementation(compose.material3)
-            implementation(compose.ui)
+        val commonMain by getting {
+            dependencies {
+                implementation("org.jetbrains.compose.runtime:runtime:1.12.2")
+                implementation("org.jetbrains.compose.foundation:foundation:1.12.2")
+                implementation("org.jetbrains.compose.material3:material3:1.12.0-alpha03")
+                implementation("org.jetbrains.compose.ui:ui:1.12.2")
+            }
         }
 
-        commonTest.dependencies {
-            implementation(kotlin("test"))
+        val commonTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+            }
         }
 
-        androidMain.dependencies {
-            implementation("androidx.activity:activity-compose:${libs.versions.activityCompose.get()}")
+        val androidMain by getting {
+            dependencies {
+                implementation("androidx.activity:activity-compose:${libs.versions.activityCompose.get()}")
+            }
         }
 
-        desktopMain.dependencies {
-            implementation(compose.desktop.currentOs)
+        val desktopMain by getting {
+            dependencies {
+                implementation(compose.desktop.currentOs)
+            }
         }
     }
 }
