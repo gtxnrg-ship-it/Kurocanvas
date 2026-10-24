@@ -21,6 +21,7 @@ Kuro is the persistent creative companion and production operator. A model can h
 ## Start here
 
 - [Open-source component catalogue](docs/research/open-source-component-catalog.md)
+- [Motion capture and dance retargeting](docs/research/motion-capture-and-retargeting.md)
 - [Kuro runtime and native creation](docs/architecture/0001-kuro-runtime-and-native-creation.md)
 - [Dedicated local model and voice strategy](docs/architecture/0002-dedicated-model-and-voice-strategy.md)
 - [Mobile workspace blueprint](docs/design/mobile-workspace-blueprint.md)
