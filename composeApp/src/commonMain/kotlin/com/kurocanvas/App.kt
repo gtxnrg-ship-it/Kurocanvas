@@ -26,6 +26,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kurocanvas.project.AddStoryboardPanel
+import com.kurocanvas.project.KuroOperationBroker
+import com.kurocanvas.project.KuroProjectState
+import com.kurocanvas.project.OperationStatus
+import com.kurocanvas.project.UndoAddedStoryboardPanel
 
 private val Ink = Color(0xFF0A0C13)
 private val Panel = Color(0xFF121522)
@@ -49,7 +54,34 @@ private data class InkStroke(val points: List<Offset>, val color: Color, val wid
 fun App() {
     var section by remember { mutableStateOf(Section.Create) }
     var showKuro by remember { mutableStateOf(false) }
-    var demoPanels by remember { mutableIntStateOf(0) }
+    var project by remember { mutableStateOf(KuroProjectState.empty()) }
+    val operationBroker = remember { KuroOperationBroker() }
+    val addStoryboardPanel: () -> Unit = {
+        val operation = AddStoryboardPanel(
+            operationId = "op-add-panel-${project.revision + 1}",
+            projectId = project.projectId,
+            expectedRevision = project.revision,
+            actor = "user"
+        )
+        val result = operationBroker.execute(project, operation)
+        if (result.status == OperationStatus.COMMITTED) project = result.project
+    }
+    val undoLastStoryboardPanel: () -> Unit = {
+        val lastAdd = project.auditLog.lastOrNull { it.action == "add_storyboard_panel" }
+        if (lastAdd != null) {
+            val result = operationBroker.execute(
+                project,
+                UndoAddedStoryboardPanel(
+                    operationId = "op-undo-panel-${project.revision + 1}",
+                    projectId = project.projectId,
+                    expectedRevision = project.revision,
+                    targetOperationId = lastAdd.operationId,
+                    actor = "user"
+                )
+            )
+            if (result.status == OperationStatus.COMMITTED) project = result.project
+        }
+    }
     var tool by remember { mutableStateOf("Brush") }
     var brushSize by remember { mutableFloatStateOf(4.5f) }
     var strokes by remember { mutableStateOf(emptyList<InkStroke>()) }
@@ -70,6 +102,8 @@ fun App() {
                         if (strokes.isNotEmpty()) {
                             redoStrokes = redoStrokes + strokes.last()
                             strokes = strokes.dropLast(1)
+                        } else {
+                            undoLastStoryboardPanel()
                         }
                     },
                     onRedo = {
@@ -87,7 +121,7 @@ fun App() {
                             Section.Create -> CreateWorkspace(
                                 wide = wide,
                                 strokes = strokes,
-                                demoPanels = demoPanels,
+                                demoPanels = project.panels.size,
                                 tool = tool,
                                 onTool = { tool = it },
                                 brushSize = brushSize,
@@ -109,10 +143,10 @@ fun App() {
                         KuroPanel(
                             Modifier.width(320.dp).fillMaxHeight(),
                             onClose = { showKuro = false },
-                            onAddPanel = { demoPanels += 1 }
+                            onAddPanel = addStoryboardPanel
                         )
                     } else if (wide && section == Section.Create) {
-                        InspectorPanel(strokes.size, demoPanels, tool)
+                        InspectorPanel(strokes.size, project.panels.size, tool, project.revision, project.auditLog.size)
                     }
                 }
                 if (!wide) BottomNavigation(section) { section = it }
@@ -123,7 +157,7 @@ fun App() {
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                         .padding(start = 10.dp, end = 10.dp, bottom = 72.dp),
                     onClose = { showKuro = false },
-                    onAddPanel = { demoPanels += 1 }
+                    onAddPanel = addStoryboardPanel
                 )
             }
         }
@@ -353,7 +387,7 @@ private fun SketchCanvas(
 }
 
 @Composable
-private fun InspectorPanel(strokes: Int, panels: Int, tool: String) {
+private fun InspectorPanel(strokes: Int, panels: Int, tool: String, revision: Long, auditCount: Int) {
     Column(
         Modifier.width(236.dp).fillMaxHeight().background(Panel).border(1.dp, Line).padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(13.dp)
@@ -363,6 +397,8 @@ private fun InspectorPanel(strokes: Int, panels: Int, tool: String) {
         DetailRow("Tool", tool)
         DetailRow("Strokes", strokes.toString())
         DetailRow("Panels", panels.toString())
+        DetailRow("Revision", revision.toString())
+        DetailRow("Audit events", auditCount.toString())
         DividerLine()
         Text("Project status", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
         StatusPill("Persistence pending", Amber)
@@ -468,7 +504,7 @@ private fun KuroPanel(modifier: Modifier = Modifier, onClose: () -> Unit, onAddP
                 }
             }
             Text("Native-operation preview", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text("This deterministic demo adds storyboard panel outlines to the canvas. It is not model-driven and is not saved to disk yet.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+            Text("This commits a typed storyboard-panel object through the revision-checked operation broker. It updates project revision and audit history, but is still memory-only; disk storage and a local model are not connected yet.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
             Button(onClick = onAddPanel, colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink), modifier = Modifier.fillMaxWidth()) {
                 Text("Add storyboard panel • demo tool", fontSize = 12.sp)
             }
