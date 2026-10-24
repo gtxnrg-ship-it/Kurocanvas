@@ -67,7 +67,13 @@ fun App() {
         if (result.status == OperationStatus.COMMITTED) project = result.project
     }
     val undoLastStoryboardPanel: () -> Unit = {
-        val lastAdd = project.auditLog.lastOrNull { it.action == "add_storyboard_panel" }
+        val undonePanelIds = project.auditLog
+            .filter { it.action == "undo_add_storyboard_panel" }
+            .map { it.targetId }
+            .toSet()
+        val lastAdd = project.auditLog.lastOrNull {
+            it.action == "add_storyboard_panel" && it.targetId !in undonePanelIds
+        }
         if (lastAdd != null) {
             val result = operationBroker.execute(
                 project,
