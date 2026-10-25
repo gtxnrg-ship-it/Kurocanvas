@@ -235,6 +235,29 @@ fun App(storageRoot: String) {
                 if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
                 result.status
             }
+            KuroNativeActionType.ADD_STORY_ENTITY -> {
+                val entityName = proposal.entityName
+                val entityType = proposal.entityType
+                if (entityName.isNullOrBlank() || entityType == null) {
+                    OperationStatus.INVALID_STORY_ENTITY
+                } else {
+                    val revision = project.revision + 1
+                    val operation = AddStoryEntity(
+                        operationId = "op-kuro-add-entity-$revision",
+                        projectId = project.projectId,
+                        expectedRevision = project.revision,
+                        entity = KuroStoryEntity(
+                            id = "entity-$revision",
+                            name = entityName,
+                            type = entityType
+                        ),
+                        actor = "kuro-approved-by-user"
+                    )
+                    val result = operationBroker.execute(project, operation)
+                    if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+                    result.status
+                }
+            }
         }
     }
     val undoLastStoryboardPanel: () -> Unit = {
@@ -2018,7 +2041,12 @@ private fun KuroPanel(
                         Text("NATIVE ACTION PROPOSAL", color = Violet, fontSize = 10.sp, letterSpacing = 1.1.sp)
                         Text(pendingAction.summary, color = PrimaryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Nothing has changed yet. Approving this will add one storyboard panel to the current project and save it.",
+                            when (pendingAction.type) {
+                                KuroNativeActionType.ADD_STORYBOARD_PANEL ->
+                                    "Nothing has changed yet. Approving this will add one storyboard panel to the current project and save it."
+                                KuroNativeActionType.ADD_STORY_ENTITY ->
+                                    "Nothing has changed yet. Approving this will add a ${pendingAction.entityType?.name?.lowercase()?.replace('_', ' ')} named ${pendingAction.entityName} to the story graph and save it."
+                            },
                             color = MutedText,
                             fontSize = 10.sp,
                             lineHeight = 15.sp
@@ -2094,7 +2122,7 @@ private fun KuroPanel(
             DividerLine()
             Text("Native project action", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Kuro can propose adding a storyboard panel. The proposal is revision-checked and only applied after you approve it.",
+                "Kuro can propose adding a storyboard panel or a story entity. Every proposal is validated, revision-checked and only applied after you approve it.",
                 color = MutedText,
                 fontSize = 10.sp,
                 lineHeight = 15.sp

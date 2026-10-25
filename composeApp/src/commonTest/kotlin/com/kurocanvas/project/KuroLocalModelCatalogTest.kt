@@ -69,6 +69,38 @@ class KuroLocalModelCatalogTest {
     }
 
     @Test
+    fun nativeActionParserAcceptsAValidatedStoryEntityProposal() {
+        val parsed = KuroNativeActionParser.parse(
+            """{"kuro_action":{"type":"add_story_entity","summary":"Create Mira","name":"Mira","entity_type":"CHARACTER"}}"""
+        )
+        assertEquals(KuroNativeActionType.ADD_STORY_ENTITY, parsed?.type)
+        assertEquals("Mira", parsed?.entityName)
+        assertEquals(KuroStoryEntityType.CHARACTER, parsed?.entityType)
+    }
+
+    @Test
+    fun nativeActionParserRejectsInvalidEntityPayloads() {
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_story_entity","summary":"Create Mira","name":"","entity_type":"CHARACTER"}}"""
+            )
+        )
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_story_entity","summary":"Create Mira","name":"Mira","entity_type":"FILESYSTEM"}}"""
+            )
+        )
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_story_entity","summary":"Create Mira","name":"Mira","entity_type":"CHARACTER","extra":"unsafe"}}"""
+            )
+        )
+    }
+
+    @Test
     fun progressPercentageIsBoundedAndHandlesUnknownTotal() {
         assertEquals(50, KuroModelDownloadProgress(50, 100).percent)
         assertEquals(0, KuroModelDownloadProgress(10, 0).percent)
