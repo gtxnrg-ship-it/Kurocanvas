@@ -159,6 +159,14 @@ data class AddStoryboardPanel(
     override val actor: String = "user"
 ) : KuroOperation
 
+data class RenameProject(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val title: String,
+    override val actor: String = "user"
+) : KuroOperation
+
 data class UndoAddedStoryboardPanel(
     override val operationId: String,
     override val projectId: String,
@@ -288,7 +296,8 @@ enum class OperationStatus {
     INVALID_RELATIONSHIP,
     INVALID_STORY_EVENT,
     MISSING_RELATIONSHIP_ENTITY,
-    MISSING_EVENT_PARTICIPANT
+    MISSING_EVENT_PARTICIPANT,
+    INVALID_PROJECT_TITLE
 }
 
 data class KuroOperationResult(
@@ -334,6 +343,7 @@ class KuroOperationBroker {
         }
 
         return when (operation) {
+            is RenameProject -> renameProject(current, operation)
             is AddStoryboardPanel -> addPanel(current, operation)
             is UndoAddedStoryboardPanel -> undoAddedPanel(current, operation)
             is AddCanvasStroke -> addStroke(current, operation)
@@ -349,6 +359,46 @@ class KuroOperationBroker {
             is AddStoryEvent -> addStoryEvent(current, operation)
             is UndoAddedStoryEvent -> undoStoryEvent(current, operation)
         }
+    }
+
+    private fun renameProject(
+        current: KuroProjectState,
+        operation: RenameProject
+    ): KuroOperationResult {
+        val title = operation.title.trim()
+        if (title.isBlank() || title.length > 120) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_PROJECT_TITLE,
+                current,
+                "Project titles must contain 1–120 characters."
+            )
+        }
+        if (title == current.title) {
+            return KuroOperationResult(
+                OperationStatus.COMMITTED,
+                current,
+                "Project title is unchanged."
+            )
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            title = title,
+            revision = revision,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "rename_project",
+                targetId = current.projectId,
+                summary = "Renamed project to $title."
+            )
+        )
+        return KuroOperationResult(
+            OperationStatus.COMMITTED,
+            next,
+            "Project title updated.",
+            current.projectId
+        )
     }
 
     private fun addPanel(

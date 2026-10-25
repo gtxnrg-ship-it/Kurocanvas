@@ -59,6 +59,7 @@ import com.kurocanvas.project.KuroVaultAsset
 import com.kurocanvas.project.KuroVaultIndex
 import com.kurocanvas.project.createKuroVaultStorage
 import com.kurocanvas.project.AddStoryboardPanel
+import com.kurocanvas.project.RenameProject
 import com.kurocanvas.project.KuroOperationBroker
 import com.kurocanvas.project.KuroCanonFact
 import com.kurocanvas.project.KuroProjectState
@@ -212,6 +213,20 @@ fun App(storageRoot: String) {
             val saved = projectStorage.save(next)
             storageWarning = if (saved.success) null else saved.message
         }
+    }
+    val renameProject: (String) -> OperationStatus = { title ->
+        val result = operationBroker.execute(
+            project,
+            RenameProject(
+                operationId = "op-rename-project-${project.revision + 1}",
+                projectId = project.projectId,
+                expectedRevision = project.revision,
+                title = title,
+                actor = "user"
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
     }
     val addStoryboardPanel: () -> Unit = {
         val operation = AddStoryboardPanel(
@@ -541,6 +556,8 @@ fun App(storageRoot: String) {
                 }
                 TopBar(
                     wide = wide,
+                    projectTitle = project.title,
+                    onRenameProject = renameProject,
                     onUndo = {
                         val lastStroke = project.strokes.lastOrNull()
                         if (lastStroke != null) {
@@ -706,7 +723,55 @@ fun App(storageRoot: String) {
 }
 
 @Composable
-private fun TopBar(wide: Boolean, onUndo: () -> Unit, onRedo: () -> Unit, onKuro: () -> Unit) {
+private fun TopBar(
+    wide: Boolean,
+    projectTitle: String,
+    onRenameProject: (String) -> OperationStatus,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onKuro: () -> Unit
+) {
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var draftTitle by remember(projectTitle) { mutableStateOf(projectTitle) }
+    var renameMessage by remember { mutableStateOf<String?>(null) }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false; renameMessage = null },
+            title = { Text("Rename project") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = draftTitle,
+                        onValueChange = { draftTitle = it; renameMessage = null },
+                        label = { Text("Project title") },
+                        singleLine = true
+                    )
+                    if (renameMessage != null) {
+                        Text(renameMessage.orEmpty(), color = Amber, fontSize = 11.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val status = onRenameProject(draftTitle)
+                    if (status == OperationStatus.COMMITTED) {
+                        showRenameDialog = false
+                        renameMessage = null
+                    } else {
+                        renameMessage = when (status) {
+                            OperationStatus.INVALID_PROJECT_TITLE -> "Use 1–120 characters for the project title."
+                            else -> "Could not rename project: ${status.name.lowercase().replace('_', ' ')}."
+                        }
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false; renameMessage = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     Row(
         Modifier.fillMaxWidth().background(Panel).border(1.dp, Line).padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -718,7 +783,10 @@ private fun TopBar(wide: Boolean, onUndo: () -> Unit, onRedo: () -> Unit, onKuro
         ) { Text("K", color = Ink, fontWeight = FontWeight.Black, fontSize = 19.sp) }
         Column(Modifier.weight(1f)) {
             Text("KURO CANVAS", fontWeight = FontWeight.Bold, fontSize = 13.sp, letterSpacing = 1.2.sp)
-            Text(if (wide) "Untitled project  /  Creative workspace" else "Untitled project", color = MutedText, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (wide) "$projectTitle  /  Creative workspace" else projectTitle, color = MutedText, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        TextButton(onClick = { draftTitle = projectTitle; renameMessage = null; showRenameDialog = true }) {
+            Text("Rename", color = MutedText, fontSize = 10.sp)
         }
         Text("PROTOTYPE", color = Amber, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
         TextButton(onClick = onUndo) { Text("↶", color = PrimaryText, fontSize = 20.sp) }
