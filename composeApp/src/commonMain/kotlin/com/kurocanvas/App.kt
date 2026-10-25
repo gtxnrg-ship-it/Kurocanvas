@@ -40,6 +40,8 @@ import com.kurocanvas.project.AddStoryEvent
 import com.kurocanvas.project.AddStoryRelationship
 import com.kurocanvas.project.KuroLayer
 import com.kurocanvas.project.KuroContextRequest
+import com.kurocanvas.project.KuroCharacterProfileResolver
+import com.kurocanvas.project.KuroProfileFieldStatus
 import com.kurocanvas.project.KuroModelCatalog
 import com.kurocanvas.project.KuroModelDownloadProgress
 import com.kurocanvas.project.KuroModelManifest
@@ -1034,6 +1036,7 @@ private fun StoryWorkspace(
     var selectedEntityId by remember(project.projectId) {
         mutableStateOf(project.storyEntities.firstOrNull()?.id.orEmpty())
     }
+    var profileChapter by remember { mutableStateOf("1") }
     var predicate by remember { mutableStateOf("Hair color") }
     var value by remember { mutableStateOf("") }
     var fromChapter by remember { mutableStateOf("1") }
@@ -1061,6 +1064,14 @@ private fun StoryWorkspace(
     val entityFacts = project.canonFacts
         .filter { it.subjectId == selectedEntityId && it.status == com.kurocanvas.project.KuroCanonFactStatus.CONFIRMED }
         .sortedBy { it.fromChapter }
+    val characterProfile = selectedEntity?.takeIf { it.type == KuroStoryEntityType.CHARACTER }?.let {
+        KuroCharacterProfileResolver.resolve(
+            project = project,
+            entityId = it.id,
+            chapter = profileChapter.toIntOrNull() ?: 0,
+            branchId = branchId
+        )
+    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -1137,6 +1148,59 @@ private fun StoryWorkspace(
                                     Text(entity.type.name.lowercase(), color = MutedText, fontSize = 10.sp)
                                 }
                                 if (entity.id == selectedEntityId) StatusPill("SELECTED", Violet)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (selectedEntity?.type == KuroStoryEntityType.CHARACTER) {
+            Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("CHARACTER PROFILE SNAPSHOT", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                    Text(
+                        "Resolved canon for ${selectedEntity.name}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = profileChapter,
+                            onValueChange = { profileChapter = it },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("View at chapter") },
+                            singleLine = true
+                        )
+                        Text("Branch: $branchId", color = MutedText, fontSize = 11.sp)
+                    }
+                    Text(
+                        "This is a read-only design reference. Unknown traits stay unknown; conflicts are surfaced instead of guessed.",
+                        color = MutedText,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                    if (characterProfile == null) {
+                        Text("Enter a chapter number greater than zero.", color = Amber, fontSize = 12.sp)
+                    } else {
+                        characterProfile.fields.forEach { field ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(field.predicate, color = MutedText, fontSize = 12.sp, modifier = Modifier.weight(0.38f))
+                                Column(Modifier.weight(0.62f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    when (field.status) {
+                                        KuroProfileFieldStatus.KNOWN -> Text(field.value.orEmpty(), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                        KuroProfileFieldStatus.UNKNOWN -> Text("Unknown — not in canon", color = MutedText, fontSize = 12.sp)
+                                        KuroProfileFieldStatus.CONFLICT -> Text(
+                                            "Conflict: ${field.alternatives.joinToString(" / ")}",
+                                            color = Amber,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
