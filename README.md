@@ -29,7 +29,7 @@ Kuro is the persistent creative companion and production operator. A model can h
 
 ## Current status
 
-The repository has moved from an empty bootstrap into architecture, research and interaction-design documents. The next code step is a compile-tested Android/desktop shell, followed by the first real editable-stroke/save/reopen vertical slice. UI status must never pretend a model or engine is integrated before it actually is.
+The repository now has a typed native project-operation broker, revision/audit/undo support for storyboard panels, a cross-platform JSON project codec, and app-private autosave/load wiring for Android and desktop. Storage writes use a temporary file and atomic replacement where the filesystem supports it. The current project model persists storyboard panels and its audit log; canvas strokes, full asset Vault, story/character/timeline engines, 3D, motion capture, and local-model inference remain unfinished. UI status must never pretend an engine is integrated before it actually is.
 
 ## Dependency and asset licensing
 

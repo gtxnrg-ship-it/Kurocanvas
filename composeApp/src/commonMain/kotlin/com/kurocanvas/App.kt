@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import com.kurocanvas.project.AddStoryboardPanel
 import com.kurocanvas.project.KuroOperationBroker
 import com.kurocanvas.project.KuroProjectState
+import com.kurocanvas.project.createKuroProjectStorage
 import com.kurocanvas.project.OperationStatus
 import com.kurocanvas.project.UndoAddedStoryboardPanel
 
@@ -51,11 +52,24 @@ private enum class Section(val label: String, val glyph: String) {
 private data class InkStroke(val points: List<Offset>, val color: Color, val width: Float)
 
 @Composable
-fun App() {
+fun App(storageRoot: String) {
     var section by remember { mutableStateOf(Section.Create) }
     var showKuro by remember { mutableStateOf(false) }
-    var project by remember { mutableStateOf(KuroProjectState.empty()) }
+    val projectStorage = remember(storageRoot) { createKuroProjectStorage(storageRoot) }
+    val initialLoad = remember(projectStorage) { projectStorage.load() }
+    var project by remember(projectStorage) {
+        mutableStateOf(initialLoad.state ?: KuroProjectState.empty())
+    }
+    var storageWarning by remember(projectStorage) { mutableStateOf(initialLoad.warning) }
+    val projectWritesAllowed = initialLoad.warning == null
     val operationBroker = remember { KuroOperationBroker() }
+    val commitProject: (KuroProjectState) -> Unit = { next ->
+        project = next
+        if (projectWritesAllowed) {
+            val saved = projectStorage.save(next)
+            storageWarning = if (saved.success) null else saved.message
+        }
+    }
     val addStoryboardPanel: () -> Unit = {
         val operation = AddStoryboardPanel(
             operationId = "op-add-panel-${project.revision + 1}",
@@ -64,7 +78,7 @@ fun App() {
             actor = "user"
         )
         val result = operationBroker.execute(project, operation)
-        if (result.status == OperationStatus.COMMITTED) project = result.project
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
     }
     val undoLastStoryboardPanel: () -> Unit = {
         val undonePanelIds = project.auditLog
@@ -102,6 +116,14 @@ fun App() {
         BoxWithConstraints(Modifier.fillMaxSize().background(Ink)) {
             val wide = maxWidth >= 900.dp
             Column(Modifier.fillMaxSize()) {
+                if (storageWarning != null) {
+                    Text(
+                        text = storageWarning.orEmpty(),
+                        color = Amber,
+                        fontSize = 11.sp,
+                        modifier = Modifier.fillMaxWidth().background(Raised).padding(horizontal = 12.dp, vertical = 7.dp)
+                    )
+                }
                 TopBar(
                     wide = wide,
                     onUndo = {
