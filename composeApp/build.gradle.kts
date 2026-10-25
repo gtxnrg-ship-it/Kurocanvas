@@ -34,12 +34,14 @@ kotlin {
         val androidMain by getting {
             dependencies {
                 implementation("androidx.activity:activity-compose:${libs.versions.activityCompose.get()}")
+                implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
             }
         }
 
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
+                implementation("com.google.ai.edge.litertlm:litertlm-jvm:0.18.0")
             }
         }
     }
