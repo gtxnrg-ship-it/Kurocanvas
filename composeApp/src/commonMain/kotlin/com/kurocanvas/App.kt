@@ -47,6 +47,7 @@ import com.kurocanvas.project.KuroModelDownloadProgress
 import com.kurocanvas.project.KuroModelManifest
 import com.kurocanvas.project.KuroNativeActionParser
 import com.kurocanvas.project.KuroNativeActionProposal
+import com.kurocanvas.project.KuroNativeActionDispatcher
 import com.kurocanvas.project.KuroNativeActionType
 import com.kurocanvas.project.KuroPromptBuilder
 import com.kurocanvas.project.KuroStoryContextCompiler
@@ -223,74 +224,9 @@ fun App(storageRoot: String) {
         if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
     }
     val applyKuroAction: (KuroNativeActionProposal) -> OperationStatus = { proposal ->
-        when (proposal.type) {
-            KuroNativeActionType.ADD_STORYBOARD_PANEL -> {
-                val operation = AddStoryboardPanel(
-                    operationId = "op-kuro-add-panel-${project.revision + 1}",
-                    projectId = project.projectId,
-                    expectedRevision = project.revision,
-                    actor = "kuro-approved-by-user"
-                )
-                val result = operationBroker.execute(project, operation)
-                if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
-                result.status
-            }
-            KuroNativeActionType.ADD_STORY_ENTITY -> {
-                val entityName = proposal.entityName
-                val entityType = proposal.entityType
-                if (entityName.isNullOrBlank() || entityType == null) {
-                    OperationStatus.INVALID_STORY_ENTITY
-                } else {
-                    val revision = project.revision + 1
-                    val operation = AddStoryEntity(
-                        operationId = "op-kuro-add-entity-$revision",
-                        projectId = project.projectId,
-                        expectedRevision = project.revision,
-                        entity = KuroStoryEntity(
-                            id = "entity-$revision",
-                            name = entityName,
-                            type = entityType
-                        ),
-                        actor = "kuro-approved-by-user"
-                    )
-                    val result = operationBroker.execute(project, operation)
-                    if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
-                    result.status
-                }
-            }
-            KuroNativeActionType.ADD_CANON_FACT -> {
-                val subjectId = proposal.subjectId
-                val predicate = proposal.predicate
-                val value = proposal.value
-                val fromChapter = proposal.fromChapter
-                val branchId = proposal.branchId
-                if (subjectId.isNullOrBlank() || predicate.isNullOrBlank() || value.isNullOrBlank() ||
-                    fromChapter == null || branchId.isNullOrBlank()
-                ) {
-                    OperationStatus.INVALID_CANON_FACT
-                } else {
-                    val revision = project.revision + 1
-                    val operation = AddCanonFact(
-                        operationId = "op-kuro-add-canon-$revision",
-                        projectId = project.projectId,
-                        expectedRevision = project.revision,
-                        fact = KuroCanonFact(
-                            id = "fact-$revision",
-                            subjectId = subjectId,
-                            predicate = predicate,
-                            value = value,
-                            branchId = branchId,
-                            fromChapter = fromChapter,
-                            untilChapterExclusive = proposal.untilChapterExclusive
-                        ),
-                        actor = "kuro-approved-by-user"
-                    )
-                    val result = operationBroker.execute(project, operation)
-                    if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
-                    result.status
-                }
-            }
-        }
+        val result = KuroNativeActionDispatcher.apply(project, proposal, operationBroker)
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
     }
     val undoLastStoryboardPanel: () -> Unit = {
         val undonePanelIds = project.auditLog
