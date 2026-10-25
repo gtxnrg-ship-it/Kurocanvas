@@ -7,7 +7,7 @@ Kuro Canvas is not an image generator or a chatbot wrapped around a canvas. The 
 ## Current working foundation
 
 - **Build:** Android debug APK and desktop target are verified by GitHub Actions CI.
-- **Local projects:** JSON project loading/autosave with atomic-replacement writes on Android and desktop.
+- **Local metadata:** SQLite-backed project state and Vault index, transactional writes, a schema-versioned database, and one-time import from legacy `project.json` / `vault-index.json` files. Legacy source files are preserved after migration. The current store has one active project payload; a multi-project library and normalized graph tables remain future work.
 - **Editable canvas:** normalized brush-stroke geometry with color, width and layer references; typed operations with revision checks, audit events and undo.
 - **Layers:** layer creation/settings, visibility, locking, opacity, selection and dependency-safe removal are wired into the drawing workspace.
 - **Story canon and graph:** typed character/location/organization/object/event records, time-scoped facts, relationship edges and chapter events are stored as project data. Character profile snapshots resolve age, height, hair, clothing, status and other traits by chapter/branch; unknowns and conflicts stay visible.
@@ -19,7 +19,7 @@ Kuro Canvas is not an image generator or a chatbot wrapped around a canvas. The 
 ## Product principles
 
 - **Native creation, not flattened generation.** Drawings, characters, scenes and assets must remain editable.
-- **AI is optional; creative tools are not.** Drawing, editing, saving, import/export and project management work without a model.
+- **AI is optional; creative tools are not.** Drawing, editing, saving, importing and project management work without a model.
 - **The project is the source of truth.** Conversation history alone is never canon.
 - **Continuity is temporal.** Character facts can differ by chapter and timeline branch.
 - **Inspectability and control.** Typed operations validate project identity/revision, record audit history and support undo where implemented.

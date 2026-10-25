@@ -1,62 +1,111 @@
 package com.kurocanvas.project
 
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import java.io.File
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 actual fun createKuroProjectStorage(rootPath: String): KuroProjectStorage =
-    FileKuroProjectStorage(rootPath)
+    SqliteKuroProjectStorage(rootPath)
 
-private class FileKuroProjectStorage(rootPath: String) : KuroProjectStorage {
-    private val destination = File(rootPath, "project.json")
+private class SqliteKuroProjectStorage(private val rootPath: String) : KuroProjectStorage {
+    private val databaseFile = File(rootPath, KURO_DATABASE_NAME)
+    private val legacyFile = File(rootPath, "project.json")
 
     override fun load(): KuroStorageReadResult {
-        if (!destination.exists()) return KuroStorageReadResult(state = null, found = false)
-        return try {
-            KuroStorageReadResult(
-                state = KuroProjectCodec.decode(destination.readText(Charsets.UTF_8)),
-                found = true
-            )
+        if (!databaseFile.exists() && !legacyFile.exists()) {
+            return KuroStorageReadResult(state = null, found = false)
+        }
+        try {
+            val database = openKuroDatabase(rootPath)
+            val stored = try { readStoredProject(database) } finally { database.close() }
+            if (stored != null) return stored
         } catch (error: Exception) {
-            KuroStorageReadResult(
+            return KuroStorageReadResult(
                 state = null,
                 found = true,
-                warning = "Saved project was not loaded, and its file was left untouched. " +
-                    "Reason: ${error.message ?: error::class.simpleName ?: "invalid data"}"
+                warning = "Saved project data was not changed because the SQLite database could not be read. " +
+                    (error.message ?: error::class.simpleName ?: "storage error")
+            )
+        }
+
+        if (!legacyFile.exists()) return KuroStorageReadResult(state = null, found = databaseFile.exists())
+        val legacyState = try {
+            KuroProjectCodec.decode(legacyFile.readText(Charsets.UTF_8))
+        } catch (error: Exception) {
+            return KuroStorageReadResult(
+                state = null,
+                found = true,
+                warning = "The legacy project file could not be imported and was left untouched. " +
+                    (error.message ?: error::class.simpleName ?: "invalid data")
+            )
+        }
+        val migrated = save(legacyState)
+        return if (migrated.success) {
+            KuroStorageReadResult(state = legacyState, found = true)
+        } else {
+            KuroStorageReadResult(
+                state = legacyState,
+                found = true,
+                warning = "The legacy project was loaded, but migration to SQLite failed. The original file was preserved. " +
+                    migrated.message
             )
         }
     }
 
     override fun save(state: KuroProjectState): KuroStorageWriteResult {
-        val parent = destination.parentFile
-            ?: return KuroStorageWriteResult(false, "The project storage directory is invalid.")
         return try {
-            if (!parent.exists() && !parent.mkdirs()) {
-                throw IllegalStateException("Could not create the private project directory.")
-            }
-            val temporary = File(parent, "${destination.name}.tmp")
-            temporary.writeText(KuroProjectCodec.encode(state), Charsets.UTF_8)
+            val database = openKuroDatabase(rootPath)
             try {
-                Files.move(
-                    temporary.toPath(),
-                    destination.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(
-                    temporary.toPath(),
-                    destination.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
+                database.beginTransaction()
+                try {
+                    val values = ContentValues().apply {
+                        put("singleton_id", 1)
+                        put("schema_version", 1)
+                        put("project_id", state.projectId)
+                        put("revision", state.revision)
+                        put("payload", KuroProjectCodec.encode(state))
+                        put("updated_at_epoch_ms", System.currentTimeMillis())
+                    }
+                    val rowId = database.insertWithOnConflict(
+                        "project_state", null, values, SQLiteDatabase.CONFLICT_REPLACE
+                    )
+                    if (rowId < 0L) throw IllegalStateException("SQLite did not store the project state.")
+                    database.setTransactionSuccessful()
+                } finally {
+                    database.endTransaction()
+                }
+            } finally {
+                database.close()
             }
-            KuroStorageWriteResult(true, "Saved locally.")
+            KuroStorageWriteResult(true, "Saved to the local SQLite database.")
         } catch (error: Exception) {
             KuroStorageWriteResult(
                 false,
-                "Could not save the project: ${error.message ?: error::class.simpleName ?: "storage error"}"
+                "Could not save the project to SQLite: " +
+                    (error.message ?: error::class.simpleName ?: "storage error")
             )
+        }
+    }
+
+    private fun readStoredProject(database: SQLiteDatabase): KuroStorageReadResult? {
+        val cursor = database.rawQuery(
+            "SELECT payload FROM project_state WHERE singleton_id = 1",
+            null
+        )
+        return try {
+            if (!cursor.moveToFirst()) return null
+            try {
+                KuroStorageReadResult(KuroProjectCodec.decode(cursor.getString(0)), found = true)
+            } catch (error: Exception) {
+                KuroStorageReadResult(
+                    state = null,
+                    found = true,
+                    warning = "The stored project payload is invalid and was preserved. " +
+                        (error.message ?: error::class.simpleName ?: "invalid data")
+                )
+            }
+        } finally {
+            cursor.close()
         }
     }
 }

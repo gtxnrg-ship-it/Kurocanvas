@@ -42,6 +42,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation("com.google.ai.edge.litertlm:litertlm-jvm:0.18.0")
+                implementation(libs.sqliteJdbc)
             }
         }
     }

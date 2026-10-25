@@ -1,55 +1,99 @@
 package com.kurocanvas.project
 
 import java.io.File
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.sql.Connection
 
 actual fun createKuroVaultStorage(rootPath: String): KuroVaultStorage =
-    FileKuroVaultStorage(rootPath)
+    SqliteKuroVaultStorage(rootPath)
 
-private class FileKuroVaultStorage(rootPath: String) : KuroVaultStorage {
-    private val destination = File(rootPath, "vault-index.json")
+private class SqliteKuroVaultStorage(private val rootPath: String) : KuroVaultStorage {
+    private val databaseFile = File(rootPath, KURO_DATABASE_NAME)
+    private val legacyFile = File(rootPath, "vault-index.json")
 
     override fun load(): KuroVaultReadResult {
-        if (!destination.exists()) return KuroVaultReadResult(KuroVaultIndex())
-        return try {
-            KuroVaultReadResult(KuroVaultCodec.decode(destination.readText(Charsets.UTF_8)))
+        if (!databaseFile.exists() && !legacyFile.exists()) return KuroVaultReadResult(KuroVaultIndex())
+        try {
+            val connection = openKuroDatabase(rootPath)
+            val stored = try { readStoredIndex(connection) } finally { connection.close() }
+            if (stored != null) return stored
         } catch (error: Exception) {
-            KuroVaultReadResult(
+            return KuroVaultReadResult(
                 index = KuroVaultIndex(),
-                warning = "The Vault index could not be read and was preserved. " +
+                warning = "The Vault data was not changed because the SQLite database could not be read. " +
+                    (error.message ?: error::class.simpleName ?: "storage error")
+            )
+        }
+
+        if (!legacyFile.exists()) return KuroVaultReadResult(KuroVaultIndex())
+        val legacyIndex = try {
+            KuroVaultCodec.decode(legacyFile.readText(Charsets.UTF_8))
+        } catch (error: Exception) {
+            return KuroVaultReadResult(
+                index = KuroVaultIndex(),
+                warning = "The legacy Vault index could not be imported and was left untouched. " +
                     (error.message ?: error::class.simpleName ?: "invalid data")
             )
         }
+        val migrated = save(legacyIndex)
+        return if (migrated.success) KuroVaultReadResult(legacyIndex) else KuroVaultReadResult(
+            index = legacyIndex,
+            warning = "The legacy Vault index was loaded, but migration to SQLite failed. The original file was preserved. " +
+                migrated.message
+        )
     }
 
     override fun save(index: KuroVaultIndex): KuroVaultWriteResult {
-        val parent = destination.parentFile
-            ?: return KuroVaultWriteResult(false, "The Vault storage directory is invalid.")
         return try {
-            if (!parent.exists() && !parent.mkdirs()) {
-                throw IllegalStateException("Could not create the local Vault directory.")
-            }
-            val temporary = File(parent, "${destination.name}.tmp")
-            temporary.writeText(KuroVaultCodec.encode(index), Charsets.UTF_8)
+            val connection = openKuroDatabase(rootPath)
             try {
-                Files.move(
-                    temporary.toPath(),
-                    destination.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                connection.autoCommit = false
+                try {
+                    connection.prepareStatement(
+                        "INSERT INTO vault_index (singleton_id, schema_version, payload, updated_at_epoch_ms) " +
+                            "VALUES (1, ?, ?, ?) ON CONFLICT(singleton_id) DO UPDATE SET " +
+                            "schema_version = excluded.schema_version, payload = excluded.payload, " +
+                            "updated_at_epoch_ms = excluded.updated_at_epoch_ms"
+                    ).use { statement ->
+                        statement.setInt(1, index.schemaVersion)
+                        statement.setString(2, KuroVaultCodec.encode(index))
+                        statement.setLong(3, System.currentTimeMillis())
+                        if (statement.executeUpdate() != 1) {
+                            throw IllegalStateException("SQLite did not store the Vault index.")
+                        }
+                    }
+                    connection.commit()
+                } catch (error: Exception) {
+                    connection.rollback()
+                    throw error
+                } finally {
+                    connection.autoCommit = true
+                }
+            } finally {
+                connection.close()
             }
-            KuroVaultWriteResult(true, "Vault index saved locally.")
+            KuroVaultWriteResult(true, "Vault index saved to SQLite.")
         } catch (error: Exception) {
             KuroVaultWriteResult(
                 false,
-                "Could not save the Vault index: " +
+                "Could not save the Vault index to SQLite: " +
                     (error.message ?: error::class.simpleName ?: "storage error")
             )
         }
     }
+
+    private fun readStoredIndex(connection: Connection): KuroVaultReadResult? =
+        connection.prepareStatement("SELECT payload FROM vault_index WHERE singleton_id = 1").use { statement ->
+            statement.executeQuery().use { result ->
+                if (!result.next()) return null
+                try {
+                    KuroVaultReadResult(KuroVaultCodec.decode(result.getString(1)))
+                } catch (error: Exception) {
+                    KuroVaultReadResult(
+                        index = KuroVaultIndex(),
+                        warning = "The stored Vault index is invalid and was preserved. " +
+                            (error.message ?: error::class.simpleName ?: "invalid data")
+                    )
+                }
+            }
+        }
 }
