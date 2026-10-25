@@ -31,6 +31,8 @@ import com.kurocanvas.project.AddCanonFact
 import com.kurocanvas.project.AddCanvasLayer
 import com.kurocanvas.project.AddCanvasStroke
 import com.kurocanvas.project.AddStoryEntity
+import com.kurocanvas.project.AddStoryEvent
+import com.kurocanvas.project.AddStoryRelationship
 import com.kurocanvas.project.KuroLayer
 import com.kurocanvas.project.KuroPlatformAssetImportButton
 import com.kurocanvas.project.KuroVaultAsset
@@ -43,12 +45,15 @@ import com.kurocanvas.project.KuroProjectState
 import com.kurocanvas.project.KuroStroke
 import com.kurocanvas.project.KuroStrokePoint
 import com.kurocanvas.project.KuroStoryEntity
+import com.kurocanvas.project.KuroStoryEvent
+import com.kurocanvas.project.KuroStoryRelationship
 import com.kurocanvas.project.KuroStoryEntityType
 import com.kurocanvas.project.createKuroProjectStorage
 import com.kurocanvas.project.OperationStatus
 import com.kurocanvas.project.UndoAddedCanvasLayer
 import com.kurocanvas.project.UndoAddedCanvasStroke
 import com.kurocanvas.project.UpdateCanvasLayer
+import com.kurocanvas.project.eventsInTimeline
 import com.kurocanvas.project.UndoAddedStoryboardPanel
 
 private val Ink = Color(0xFF0A0C13)
@@ -263,6 +268,51 @@ fun App(storageRoot: String) {
             result.status
         }
     }
+    val addStoryRelationship: (String, String, String, Int, Int?, String) -> OperationStatus = {
+            fromId, toId, relationshipType, fromChapter, untilChapter, branchId ->
+        val revision = project.revision
+        val result = operationBroker.execute(
+            project,
+            AddStoryRelationship(
+                operationId = "op-add-relationship-${revision + 1}",
+                projectId = project.projectId,
+                expectedRevision = revision,
+                relationship = KuroStoryRelationship(
+                    id = "relationship-${revision + 1}",
+                    fromEntityId = fromId,
+                    toEntityId = toId,
+                    relationshipType = relationshipType,
+                    branchId = branchId,
+                    fromChapter = fromChapter,
+                    untilChapterExclusive = untilChapter
+                )
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
+    }
+    val addStoryEvent: (String, Int, String, List<String>, String) -> OperationStatus = {
+            title, chapter, description, participants, branchId ->
+        val revision = project.revision
+        val result = operationBroker.execute(
+            project,
+            AddStoryEvent(
+                operationId = "op-add-event-${revision + 1}",
+                projectId = project.projectId,
+                expectedRevision = revision,
+                event = KuroStoryEvent(
+                    id = "event-${revision + 1}",
+                    title = title,
+                    chapter = chapter,
+                    branchId = branchId,
+                    description = description,
+                    participantEntityIds = participants
+                )
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
+    }
     val addStoryCharacter: (String) -> OperationStatus = { name ->
         val nextRevision = project.revision + 1
         val result = operationBroker.execute(
@@ -413,7 +463,7 @@ fun App(storageRoot: String) {
                                     }
                                 }
                             )
-                            Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact)
+                            Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact, addStoryRelationship, addStoryEvent)
                             Section.Vault -> VaultWorkspace(vaultIndex, vaultWarning, vaultMessage, storageRoot, vaultWritesAllowed, onVaultImportResult, onVaultMetadataUpdate)
                             Section.Style -> PlannedWorkspace("Style Lab", "Define linework, anatomy, palette, rendering and lettering as versioned Style DNA. Preview changes before approval.", "◉")
                             Section.ThreeD -> PlannedWorkspace("3D Studio", "Reusable glTF/GLB assets, real 3D viewports, rigs, cameras, lighting and animation will remain editable project data.", "◇")
@@ -797,7 +847,9 @@ private fun InspectorPanel(strokes: Int, panels: Int, tool: String, revision: Lo
 private fun StoryWorkspace(
     project: KuroProjectState,
     onAddCharacter: (String) -> OperationStatus,
-    onAddFact: (String, String, String, Int, Int?, String) -> OperationStatus
+    onAddFact: (String, String, String, Int, Int?, String) -> OperationStatus,
+    onAddRelationship: (String, String, String, Int, Int?, String) -> OperationStatus,
+    onAddEvent: (String, Int, String, List<String>, String) -> OperationStatus
 ) {
     var characterName by remember(project.projectId) { mutableStateOf("") }
     var selectedEntityId by remember(project.projectId) {
@@ -809,8 +861,24 @@ private fun StoryWorkspace(
     var untilChapter by remember { mutableStateOf("") }
     var branchId by remember { mutableStateOf("main") }
     var message by remember { mutableStateOf<String?>(null) }
+    var relatedEntityId by remember(project.projectId) {
+        mutableStateOf(project.storyEntities.firstOrNull { it.id != selectedEntityId }?.id.orEmpty())
+    }
+    var showRelatedMenu by remember { mutableStateOf(false) }
+    var relationshipType by remember { mutableStateOf("friend") }
+    var graphMessage by remember { mutableStateOf<String?>(null) }
+    var eventTitle by remember { mutableStateOf("") }
+    var eventDescription by remember { mutableStateOf("") }
+    var eventChapter by remember { mutableStateOf("1") }
+    var eventMessage by remember { mutableStateOf<String?>(null) }
 
     val selectedEntity = project.storyEntities.firstOrNull { it.id == selectedEntityId }
+    val relatedEntity = project.storyEntities.firstOrNull { it.id == relatedEntityId && it.id != selectedEntityId }
+    val selectedRelationships = project.relationships.filter {
+        (it.fromEntityId == selectedEntityId || it.toEntityId == selectedEntityId) &&
+            (it.status == com.kurocanvas.project.KuroCanonFactStatus.CONFIRMED ||
+                it.status == com.kurocanvas.project.KuroCanonFactStatus.PROPOSED)
+    }.sortedWith(compareBy({ it.fromChapter }, { it.relationshipType }))
     val entityFacts = project.canonFacts
         .filter { it.subjectId == selectedEntityId && it.status == com.kurocanvas.project.KuroCanonFactStatus.CONFIRMED }
         .sortedBy { it.fromChapter }
@@ -983,6 +1051,197 @@ private fun StoryWorkspace(
                                 val endLabel = fact.untilChapterExclusive?.let { "Ch ${it - 1}" } ?: "ongoing"
                                 Text(
                                     "Ch ${fact.fromChapter}–$endLabel • branch ${fact.branchId}",
+                                    color = MutedText,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("RELATIONSHIP GRAPH", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text("Connect story entities", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Relationships are native edges between two existing entities and can change by chapter or branch.",
+                    color = MutedText,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.weight(1f)) {
+                        OutlinedButton(
+                            onClick = { showRelatedMenu = true },
+                            enabled = selectedEntity != null && project.storyEntities.any { it.id != selectedEntityId },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(relatedEntity?.name ?: "Choose related character", maxLines = 1)
+                        }
+                        DropdownMenu(
+                            expanded = showRelatedMenu,
+                            onDismissRequest = { showRelatedMenu = false }
+                        ) {
+                            project.storyEntities.filter { it.id != selectedEntityId }.forEach { entity ->
+                                DropdownMenuItem(
+                                    text = { Text(entity.name) },
+                                    onClick = {
+                                        relatedEntityId = entity.id
+                                        showRelatedMenu = false
+                                        graphMessage = null
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = relationshipType,
+                        onValueChange = { relationshipType = it; graphMessage = null },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Relationship") },
+                        singleLine = true
+                    )
+                }
+                Text(
+                    "Range: chapter ${fromChapter.ifBlank { "?" }}–${untilChapter.takeIf { it.isNotBlank() } ?: "ongoing"} · branch $branchId",
+                    color = MutedText,
+                    fontSize = 10.sp
+                )
+                Button(
+                    onClick = {
+                        val from = fromChapter.toIntOrNull()
+                        val until = untilChapter.takeIf { it.isNotBlank() }?.toIntOrNull()
+                        if (selectedEntity == null || relatedEntity == null) {
+                            graphMessage = "Choose two different characters first."
+                        } else if (from == null || from < 1 ||
+                            (untilChapter.isNotBlank() && until == null) ||
+                            (until != null && until <= from)
+                        ) {
+                            graphMessage = "Enter a valid chapter range."
+                        } else {
+                            val status = onAddRelationship(
+                                selectedEntity.id,
+                                relatedEntity.id,
+                                relationshipType,
+                                from,
+                                until,
+                                branchId
+                            )
+                            graphMessage = when (status) {
+                                OperationStatus.COMMITTED -> "Relationship saved to this timeline."
+                                OperationStatus.MISSING_RELATIONSHIP_ENTITY -> "Both characters must exist in the project."
+                                OperationStatus.INVALID_RELATIONSHIP -> "Provide a relationship type and a valid chapter range."
+                                else -> "Could not save relationship: ${status.name.lowercase().replace('_', ' ')}."
+                            }
+                        }
+                    },
+                    enabled = selectedEntity != null && relatedEntity != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Add relationship") }
+                if (graphMessage != null) Text(graphMessage.orEmpty(), color = MutedText, fontSize = 11.sp)
+                DividerLine()
+                Text("RELATIONSHIPS FOR ${selectedEntity?.name ?: "SELECTED CHARACTER"}", color = MutedText, fontSize = 10.sp)
+                if (selectedRelationships.isEmpty()) {
+                    Text("No relationships recorded yet.", color = MutedText, fontSize = 12.sp)
+                } else {
+                    selectedRelationships.forEach { relation ->
+                        val fromName = project.storyEntities.firstOrNull { it.id == relation.fromEntityId }?.name ?: relation.fromEntityId
+                        val toName = project.storyEntities.firstOrNull { it.id == relation.toEntityId }?.name ?: relation.toEntityId
+                        val end = relation.untilChapterExclusive?.let { (it - 1).toString() } ?: "ongoing"
+                        Surface(color = Raised, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("$fromName — ${relation.relationshipType} — $toName", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Ch ${relation.fromChapter}–$end · branch ${relation.branchId} · ${relation.status.name.lowercase()}",
+                                    color = MutedText,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("EVENT TIMELINE", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text("Record a story event", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(
+                    value = eventTitle,
+                    onValueChange = { eventTitle = it; eventMessage = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Event title") },
+                    singleLine = true,
+                    enabled = selectedEntity != null
+                )
+                OutlinedTextField(
+                    value = eventChapter,
+                    onValueChange = { eventChapter = it; eventMessage = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Chapter number") },
+                    singleLine = true,
+                    enabled = selectedEntity != null
+                )
+                OutlinedTextField(
+                    value = eventDescription,
+                    onValueChange = { eventDescription = it; eventMessage = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("What happens? (optional)") },
+                    enabled = selectedEntity != null,
+                    minLines = 2
+                )
+                Text(
+                    "The selected character will be linked as a participant. Timeline branch: $branchId",
+                    color = MutedText,
+                    fontSize = 10.sp
+                )
+                Button(
+                    onClick = {
+                        val chapter = eventChapter.toIntOrNull()
+                        if (selectedEntity == null) {
+                            eventMessage = "Select a character first."
+                        } else if (eventTitle.isBlank() || chapter == null || chapter < 1) {
+                            eventMessage = "Enter an event title and a chapter number greater than zero."
+                        } else {
+                            val status = onAddEvent(
+                                eventTitle,
+                                chapter,
+                                eventDescription,
+                                listOf(selectedEntity.id),
+                                branchId
+                            )
+                            eventMessage = when (status) {
+                                OperationStatus.COMMITTED -> {
+                                    eventTitle = ""
+                                    eventDescription = ""
+                                    "Event saved to the timeline."
+                                }
+                                OperationStatus.MISSING_EVENT_PARTICIPANT -> "Event participants must be existing story entities."
+                                OperationStatus.INVALID_STORY_EVENT -> "Enter a title, branch and valid chapter number."
+                                else -> "Could not save event: ${status.name.lowercase().replace('_', ' ')}."
+                            }
+                        }
+                    },
+                    enabled = selectedEntity != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Add timeline event") }
+                if (eventMessage != null) Text(eventMessage.orEmpty(), color = MutedText, fontSize = 11.sp)
+                DividerLine()
+                val timelineEvents = project.eventsInTimeline(branchId = branchId)
+                Text("TIMELINE · ${timelineEvents.size} EVENT(S)", color = MutedText, fontSize = 10.sp)
+                if (timelineEvents.isEmpty()) {
+                    Text("No events in this branch yet.", color = MutedText, fontSize = 12.sp)
+                } else {
+                    timelineEvents.forEach { event ->
+                        Surface(color = Raised, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Ch ${event.chapter} · ${event.title}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                if (event.description.isNotBlank()) Text(event.description, color = MutedText, fontSize = 11.sp)
+                                Text(
+                                    "Participants: " + event.participantEntityIds.mapNotNull { id -> project.storyEntities.firstOrNull { it.id == id }?.name }.joinToString(", "),
                                     color = MutedText,
                                     fontSize = 10.sp
                                 )

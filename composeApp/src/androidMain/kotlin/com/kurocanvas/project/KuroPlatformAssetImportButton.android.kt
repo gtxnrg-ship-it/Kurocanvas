@@ -101,7 +101,7 @@ private fun copyAssetIntoVault(
             .takeIf { it.isNotBlank() && it.length <= 10 && it.all { char -> char.isLetterOrDigit() } }
             ?.lowercase(Locale.ROOT)
             ?.let { ".$it" } ?: ""
-        val existing = assetDirectory.listFiles()?.firstOrNull { it.name.startsWith("$sha.") }
+        val existing = assetDirectory.listFiles()?.firstOrNull { it.name == sha || it.name.startsWith("$sha.") }
         val destination = existing ?: File(assetDirectory, "$sha$extension")
         if (existing == null) {
             try {

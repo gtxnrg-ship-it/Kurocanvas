@@ -10,7 +10,7 @@ Kuro Canvas is not an image generator or a chatbot wrapped around a canvas. The 
 - **Local projects:** JSON project loading/autosave with atomic-replacement writes on Android and desktop.
 - **Editable canvas:** normalized brush-stroke geometry with color, width and layer references; typed operations with revision checks, audit events and undo.
 - **Layers:** layer creation/settings, visibility, locking, opacity, selection and dependency-safe removal are wired into the drawing workspace.
-- **Story canon:** character records and confirmed facts are stored as project data, scoped by chapter interval and timeline branch. Contradictory confirmed values are rejected rather than silently overwritten.
+- **Story canon and graph:** character records, confirmed facts, relationship edges and chapter events are stored as project data. Facts and relationships are scoped by chapter interval and timeline branch; contradictory confirmed facts are rejected rather than silently overwritten.
 - **Vault:** local file import, content hash, deduplication, metadata index and an editable license/attribution/provenance record. Imports default to UNREVIEWED; metadata entry does not independently verify rights.
 - **Local-first:** project data and asset imports are stored locally. No model endpoint is required, and this prototype does not send prompts to a remote service.
 

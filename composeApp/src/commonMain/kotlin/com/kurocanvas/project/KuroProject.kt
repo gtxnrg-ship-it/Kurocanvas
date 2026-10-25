@@ -81,6 +81,33 @@ data class KuroCanonFact(
 )
 
 @Serializable
+data class KuroStoryRelationship(
+    val id: String,
+    val fromEntityId: String,
+    val toEntityId: String,
+    val relationshipType: String,
+    val branchId: String = "main",
+    val fromChapter: Int,
+    val untilChapterExclusive: Int? = null,
+    val status: KuroCanonFactStatus = KuroCanonFactStatus.CONFIRMED,
+    val sourceNote: String = "",
+    val createdRevision: Long = 0L
+)
+
+@Serializable
+data class KuroStoryEvent(
+    val id: String,
+    val title: String,
+    val chapter: Int,
+    val branchId: String = "main",
+    val description: String = "",
+    val participantEntityIds: List<String> = emptyList(),
+    val status: KuroCanonFactStatus = KuroCanonFactStatus.CONFIRMED,
+    val sourceNote: String = "",
+    val createdRevision: Long = 0L
+)
+
+@Serializable
 data class KuroProjectState(
     val projectId: String,
     val title: String,
@@ -92,7 +119,9 @@ data class KuroProjectState(
     val storyEntities: List<KuroStoryEntity> = emptyList(),
     val canonFacts: List<KuroCanonFact> = emptyList(),
     val storyTitle: String = "Untitled story",
-    val layers: List<KuroLayer> = listOf(KuroLayer.default())
+    val layers: List<KuroLayer> = listOf(KuroLayer.default()),
+    val relationships: List<KuroStoryRelationship> = emptyList(),
+    val storyEvents: List<KuroStoryEvent> = emptyList()
 ) {
     companion object {
         fun empty(
@@ -109,7 +138,9 @@ data class KuroProjectState(
             storyEntities = emptyList(),
             canonFacts = emptyList(),
             storyTitle = "Untitled story",
-            layers = listOf(KuroLayer.default())
+            layers = listOf(KuroLayer.default()),
+            relationships = emptyList(),
+            storyEvents = emptyList()
         )
     }
 }
@@ -204,6 +235,38 @@ data class UndoAddedStoryItem(
     override val actor: String = "user"
 ) : KuroOperation
 
+data class AddStoryRelationship(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val relationship: KuroStoryRelationship,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UndoAddedStoryRelationship(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class AddStoryEvent(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val event: KuroStoryEvent,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UndoAddedStoryEvent(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
 enum class OperationStatus {
     COMMITTED,
     REVISION_CONFLICT,
@@ -221,7 +284,11 @@ enum class OperationStatus {
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_LOCKED,
-    LAYER_HIDDEN
+    LAYER_HIDDEN,
+    INVALID_RELATIONSHIP,
+    INVALID_STORY_EVENT,
+    MISSING_RELATIONSHIP_ENTITY,
+    MISSING_EVENT_PARTICIPANT
 }
 
 data class KuroOperationResult(
@@ -277,6 +344,10 @@ class KuroOperationBroker {
             is AddStoryEntity -> addStoryEntity(current, operation)
             is AddCanonFact -> addCanonFact(current, operation)
             is UndoAddedStoryItem -> undoStoryItem(current, operation)
+            is AddStoryRelationship -> addStoryRelationship(current, operation)
+            is UndoAddedStoryRelationship -> undoStoryRelationship(current, operation)
+            is AddStoryEvent -> addStoryEvent(current, operation)
+            is UndoAddedStoryEvent -> undoStoryEvent(current, operation)
         }
     }
 
@@ -756,5 +827,155 @@ class KuroOperationBroker {
         return KuroOperationResult(OperationStatus.COMMITTED, next, "Drawing layer removed.", target.targetId)
     }
 
+
+    private fun addStoryRelationship(
+        current: KuroProjectState,
+        operation: AddStoryRelationship
+    ): KuroOperationResult {
+        val relation = operation.relationship
+        if (relation.id.isBlank() || relation.relationshipType.isBlank() || relation.branchId.isBlank() ||
+            relation.fromChapter < 1 ||
+            (relation.untilChapterExclusive != null && relation.untilChapterExclusive <= relation.fromChapter) ||
+            relation.fromEntityId == relation.toEntityId
+        ) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_RELATIONSHIP,
+                current,
+                "A relationship needs two different entities, a type, branch and valid chapter interval."
+            )
+        }
+        if (current.relationships.any { it.id == relation.id }) {
+            return KuroOperationResult(OperationStatus.DUPLICATE_OBJECT_ID, current, "This relationship ID already exists.")
+        }
+        val entityIds = current.storyEntities.map { it.id }.toSet()
+        if (relation.fromEntityId !in entityIds || relation.toEntityId !in entityIds) {
+            return KuroOperationResult(
+                OperationStatus.MISSING_RELATIONSHIP_ENTITY,
+                current,
+                "Both relationship endpoints must reference existing story entities."
+            )
+        }
+        val revision = current.revision + 1
+        val saved = relation.copy(
+            relationshipType = relation.relationshipType.trim(),
+            branchId = relation.branchId.trim(),
+            sourceNote = relation.sourceNote.trim(),
+            createdRevision = revision
+        )
+        val next = current.copy(
+            revision = revision,
+            relationships = current.relationships + saved,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_story_relationship",
+                targetId = saved.id,
+                summary = "Added a time-scoped story relationship."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Story relationship committed.", saved.id)
+    }
+
+    private fun undoStoryRelationship(
+        current: KuroProjectState,
+        operation: UndoAddedStoryRelationship
+    ): KuroOperationResult {
+        val target = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (target == null || target.action != "add_story_relationship") {
+            return KuroOperationResult(OperationStatus.INVALID_UNDO_TARGET, current, "The target operation did not add a relationship.")
+        }
+        if (current.auditLog.any { it.action == "undo_add_story_relationship" && it.targetId == target.targetId }) {
+            return KuroOperationResult(OperationStatus.ALREADY_UNDONE, current, "This relationship has already been removed.")
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            revision = revision,
+            relationships = current.relationships.filterNot { it.id == target.targetId },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "undo_add_story_relationship",
+                targetId = target.targetId,
+                summary = "Undid a story relationship."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Story relationship removed.", target.targetId)
+    }
+
+    private fun addStoryEvent(
+        current: KuroProjectState,
+        operation: AddStoryEvent
+    ): KuroOperationResult {
+        val event = operation.event
+        if (event.id.isBlank() || event.title.isBlank() || event.chapter < 1 || event.branchId.isBlank()) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_STORY_EVENT,
+                current,
+                "A story event needs a title, branch and chapter number greater than zero."
+            )
+        }
+        if (current.storyEvents.any { it.id == event.id }) {
+            return KuroOperationResult(OperationStatus.DUPLICATE_OBJECT_ID, current, "This story event ID already exists.")
+        }
+        val entityIds = current.storyEntities.map { it.id }.toSet()
+        if (event.participantEntityIds.any { it !in entityIds }) {
+            return KuroOperationResult(
+                OperationStatus.MISSING_EVENT_PARTICIPANT,
+                current,
+                "Every event participant must reference an existing story entity."
+            )
+        }
+        val revision = current.revision + 1
+        val saved = event.copy(
+            title = event.title.trim(),
+            branchId = event.branchId.trim(),
+            description = event.description.trim(),
+            participantEntityIds = event.participantEntityIds.distinct(),
+            sourceNote = event.sourceNote.trim(),
+            createdRevision = revision
+        )
+        val next = current.copy(
+            revision = revision,
+            storyEvents = current.storyEvents + saved,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_story_event",
+                targetId = saved.id,
+                summary = "Added a story event at chapter ${saved.chapter}."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Story event committed.", saved.id)
+    }
+
+    private fun undoStoryEvent(
+        current: KuroProjectState,
+        operation: UndoAddedStoryEvent
+    ): KuroOperationResult {
+        val target = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (target == null || target.action != "add_story_event") {
+            return KuroOperationResult(OperationStatus.INVALID_UNDO_TARGET, current, "The target operation did not add a story event.")
+        }
+        if (current.auditLog.any { it.action == "undo_add_story_event" && it.targetId == target.targetId }) {
+            return KuroOperationResult(OperationStatus.ALREADY_UNDONE, current, "This story event has already been removed.")
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            revision = revision,
+            storyEvents = current.storyEvents.filterNot { it.id == target.targetId },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "undo_add_story_event",
+                targetId = target.targetId,
+                summary = "Undid a story event."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Story event removed.", target.targetId)
+    }
 
 }
