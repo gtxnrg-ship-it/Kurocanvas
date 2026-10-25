@@ -38,6 +38,7 @@ data class KuroCompiledStoryContext(
     val relationships: List<KuroStoryRelationship> = emptyList(),
     val recentEvents: List<KuroStoryEvent> = emptyList(),
     val issues: List<KuroContextIssue> = emptyList(),
+    val includesProposedRecords: Boolean = false,
     val message: String = ""
 ) {
     fun renderForModel(): String {
@@ -49,24 +50,24 @@ data class KuroCompiledStoryContext(
             "Branch: $branchId",
             "Current chapter: $chapter",
             "Scope contains ${entities.size} relevant entities.",
-            "Use only confirmed facts below. Unknown facts are unknown, not permission to guess."
+            if (includesProposedRecords) "Confirmed records are canon. Proposed records are unconfirmed suggestions and must never be treated as established facts." else "Use only confirmed facts below. Unknown facts are unknown, not permission to guess."
         )
         lines += "\nENTITIES"
         entities.forEach { lines += "- ${it.id}: ${it.name} (${it.type.name.lowercase()})" }
         lines += "\nFACT RECORDS"
-        if (facts.isEmpty()) lines += "- No matching confirmed facts were found."
+        if (facts.isEmpty()) lines += if (includesProposedRecords) "- No matching confirmed or proposed facts were found." else "- No matching confirmed facts were found."
         facts.forEach { fact ->
             val end = fact.untilChapterExclusive?.let { (it - 1).toString() } ?: "ongoing"
             lines += "- [${fact.status.name.lowercase()}] ${fact.subjectId} / ${fact.predicate}: ${fact.value} (branch=${fact.branchId}, chapters ${fact.fromChapter}–$end)"
             if (fact.sourceNote.isNotBlank()) lines += "  Source note: ${fact.sourceNote}"
         }
         lines += "\nACTIVE RELATIONSHIPS"
-        if (relationships.isEmpty()) lines += "- No matching confirmed relationships were found."
+        if (relationships.isEmpty()) lines += if (includesProposedRecords) "- No matching confirmed or proposed relationships were found." else "- No matching confirmed relationships were found."
         relationships.forEach { relation ->
             lines += "- [${relation.status.name.lowercase()}] ${relation.fromEntityId} — ${relation.relationshipType} — ${relation.toEntityId}"
         }
         lines += "\nRECENT STORY EVENTS"
-        if (recentEvents.isEmpty()) lines += "- No recorded events in the requested chapter window."
+        if (recentEvents.isEmpty()) lines += if (includesProposedRecords) "- No confirmed or proposed events in the requested chapter window." else "- No confirmed events in the requested chapter window."
         recentEvents.forEach { event ->
             val description = if (event.description.isNotBlank()) " — ${event.description}" else ""
             lines += "- [${event.status.name.lowercase()}] Chapter ${event.chapter}: ${event.title}$description"
@@ -197,6 +198,7 @@ object KuroStoryContextCompiler {
             relationships = activeRelationships,
             recentEvents = events,
             issues = issues.distinct(),
+            includesProposedRecords = request.includeProposed,
             message = "Compiled a chapter- and branch-scoped canon context."
         )
     }

@@ -101,6 +101,38 @@ class KuroStoryContextCompilerTest {
     }
 
     @Test
+    fun proposedRecordsAreClearlyLabelledAsUnconfirmed() {
+        var project = KuroProjectState.empty(projectId = "context-proposed")
+        project = addEntity(project, "mira", "Mira")
+        project = broker.execute(
+            project,
+            AddCanonFact(
+                "fact-proposed-op",
+                project.projectId,
+                project.revision,
+                KuroCanonFact(
+                    "fact-proposed",
+                    "mira",
+                    "Hair color",
+                    "Silver",
+                    status = KuroCanonFactStatus.PROPOSED,
+                    fromChapter = 1
+                )
+            )
+        ).project
+
+        val compiled = KuroStoryContextCompiler.compile(
+            project,
+            KuroContextRequest(chapter = 1, entityIds = setOf("mira"), includeProposed = true)
+        )
+        val rendered = compiled.renderForModel()
+
+        assertTrue(compiled.includesProposedRecords)
+        assertTrue(rendered.contains("[proposed]"))
+        assertTrue(rendered.contains("must never be treated as established facts"))
+    }
+
+    @Test
     fun contextDoesNotUseFactsFromAnotherTimelineBranch() {
         var project = KuroProjectState.empty(projectId = "context")
         project = addEntity(project, "mira", "Mira")

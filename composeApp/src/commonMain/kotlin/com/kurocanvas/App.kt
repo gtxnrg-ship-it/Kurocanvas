@@ -347,7 +347,7 @@ fun App(storageRoot: String) {
         if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
         result.status
     }
-    val addStoryCharacter: (String) -> OperationStatus = { name ->
+    val addStoryEntity: (String, KuroStoryEntityType) -> OperationStatus = { name, type ->
         val nextRevision = project.revision + 1
         val result = operationBroker.execute(
             project,
@@ -358,7 +358,7 @@ fun App(storageRoot: String) {
                 entity = KuroStoryEntity(
                     id = "entity-$nextRevision",
                     name = name,
-                    type = KuroStoryEntityType.CHARACTER
+                    type = type
                 )
             )
         )
@@ -608,7 +608,7 @@ fun App(storageRoot: String) {
                                     }
                                 }
                             )
-                            Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact, addStoryRelationship, addStoryEvent)
+                            Section.Story -> StoryWorkspace(project, addStoryEntity, addCanonFact, addStoryRelationship, addStoryEvent)
                             Section.Vault -> VaultWorkspace(vaultIndex, vaultWarning, vaultMessage, storageRoot, vaultWritesAllowed, onVaultImportResult, onVaultMetadataUpdate)
                             Section.Style -> PlannedWorkspace("Style Lab", "Define linework, anatomy, palette, rendering and lettering as versioned Style DNA. Preview changes before approval.", "◉")
                             Section.ThreeD -> PlannedWorkspace("3D Studio", "Reusable glTF/GLB assets, real 3D viewports, rigs, cameras, lighting and animation will remain editable project data.", "◇")
@@ -1023,12 +1023,14 @@ private fun InspectorPanel(strokes: Int, panels: Int, tool: String, revision: Lo
 @Composable
 private fun StoryWorkspace(
     project: KuroProjectState,
-    onAddCharacter: (String) -> OperationStatus,
+    onAddEntity: (String, KuroStoryEntityType) -> OperationStatus,
     onAddFact: (String, String, String, Int, Int?, String) -> OperationStatus,
     onAddRelationship: (String, String, String, Int, Int?, String) -> OperationStatus,
     onAddEvent: (String, Int, String, List<String>, String) -> OperationStatus
 ) {
-    var characterName by remember(project.projectId) { mutableStateOf("") }
+    var entityName by remember(project.projectId) { mutableStateOf("") }
+    var entityType by remember(project.projectId) { mutableStateOf(KuroStoryEntityType.CHARACTER) }
+    var showEntityTypeMenu by remember { mutableStateOf(false) }
     var selectedEntityId by remember(project.projectId) {
         mutableStateOf(project.storyEntities.firstOrNull()?.id.orEmpty())
     }
@@ -1072,32 +1074,49 @@ private fun StoryWorkspace(
         )
         Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("CHARACTER VAULT", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
-                Text("Add a character", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("STORY ENTITY VAULT", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text("Add a story entity", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(
-                    value = characterName,
-                    onValueChange = { characterName = it; message = null },
+                    value = entityName,
+                    onValueChange = { entityName = it; message = null },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Character name") },
+                    label = { Text("${entityType.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }} name") },
                     singleLine = true
                 )
+                Box {
+                    OutlinedButton(
+                        onClick = { showEntityTypeMenu = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Entity type: ${entityType.name.lowercase().replace('_', ' ')}") }
+                    DropdownMenu(
+                        expanded = showEntityTypeMenu,
+                        onDismissRequest = { showEntityTypeMenu = false }
+                    ) {
+                        KuroStoryEntityType.entries.forEach { type ->
+                            DropdownMenuItem(
+                                text = { Text(type.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }) },
+                                onClick = { entityType = type; showEntityTypeMenu = false; message = null }
+                            )
+                        }
+                    }
+                }
                 Button(
                     onClick = {
                         val newId = "entity-${project.revision + 1}"
-                        val status = onAddCharacter(characterName)
+                        val status = onAddEntity(entityName, entityType)
                         message = when (status) {
-                            OperationStatus.COMMITTED -> "Character saved to this project."
-                            OperationStatus.DUPLICATE_OBJECT_ID -> "That character already exists, or the new item ID is not unique."
-                            OperationStatus.INVALID_STORY_ENTITY -> "Enter a character name first."
-                            else -> "Could not save this character: ${status.name.lowercase().replace('_', ' ')}."
+                            OperationStatus.COMMITTED -> "${entityType.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }} saved to this project."
+                            OperationStatus.DUPLICATE_OBJECT_ID -> "That entity already exists, or the new item ID is not unique."
+                            OperationStatus.INVALID_STORY_ENTITY -> "Enter an entity name first."
+                            else -> "Could not save this entity: ${status.name.lowercase().replace('_', ' ')}."
                         }
                         if (status == OperationStatus.COMMITTED) {
                             selectedEntityId = newId
-                            characterName = ""
+                            entityName = ""
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Add character") }
+                ) { Text("Add entity") }
                 if (project.storyEntities.isEmpty()) {
                     Text("No characters yet. The story starts empty on purpose.", color = MutedText, fontSize = 12.sp)
                 } else {
