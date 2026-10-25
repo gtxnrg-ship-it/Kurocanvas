@@ -56,12 +56,12 @@ class KuroProjectRenameTest {
             RenameProject("rename-1", project.projectId, project.revision, "Chapter One")
         )
         val stale = broker.execute(
-            project,
+            renamed.project,
             RenameProject("rename-2", project.projectId, project.revision, "Chapter Two")
         )
 
         assertEquals(OperationStatus.COMMITTED, renamed.status)
         assertEquals(OperationStatus.REVISION_CONFLICT, stale.status)
-        assertEquals(project, stale.project)
+        assertEquals(renamed.project, stale.project)
     }
 }
