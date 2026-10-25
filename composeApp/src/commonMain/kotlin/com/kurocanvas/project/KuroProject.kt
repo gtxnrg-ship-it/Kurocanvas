@@ -35,6 +35,36 @@ data class KuroStroke(
 )
 
 @Serializable
+enum class KuroStoryEntityType { CHARACTER, LOCATION, ORGANIZATION, OBJECT, EVENT }
+
+@Serializable
+enum class KuroCanonFactStatus { PROPOSED, CONFIRMED, RETRACTED }
+
+@Serializable
+data class KuroStoryEntity(
+    val id: String,
+    val name: String,
+    val type: KuroStoryEntityType = KuroStoryEntityType.CHARACTER,
+    val aliases: List<String> = emptyList(),
+    val createdRevision: Long = 0L
+)
+
+@Serializable
+data class KuroCanonFact(
+    val id: String,
+    val subjectId: String,
+    val predicate: String,
+    val value: String,
+    val branchId: String = "main",
+    val fromChapter: Int,
+    /** Exclusive upper bound; null means the fact remains valid indefinitely. */
+    val untilChapterExclusive: Int? = null,
+    val status: KuroCanonFactStatus = KuroCanonFactStatus.CONFIRMED,
+    val sourceNote: String = "",
+    val createdRevision: Long = 0L
+)
+
+@Serializable
 data class KuroProjectState(
     val projectId: String,
     val title: String,
@@ -42,7 +72,10 @@ data class KuroProjectState(
     val panels: List<StoryboardPanel>,
     val auditLog: List<KuroAuditEvent>,
     val nextPanelNumber: Int,
-    val strokes: List<KuroStroke> = emptyList()
+    val strokes: List<KuroStroke> = emptyList(),
+    val storyEntities: List<KuroStoryEntity> = emptyList(),
+    val canonFacts: List<KuroCanonFact> = emptyList(),
+    val storyTitle: String = "Untitled story"
 ) {
     companion object {
         fun empty(
@@ -55,7 +88,10 @@ data class KuroProjectState(
             panels = emptyList(),
             auditLog = emptyList(),
             nextPanelNumber = 1,
-            strokes = emptyList()
+            strokes = emptyList(),
+            storyEntities = emptyList(),
+            canonFacts = emptyList(),
+            storyTitle = "Untitled story"
         )
     }
 }
@@ -98,6 +134,30 @@ data class UndoAddedCanvasStroke(
     override val actor: String = "user"
 ) : KuroOperation
 
+data class AddStoryEntity(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val entity: KuroStoryEntity,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class AddCanonFact(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val fact: KuroCanonFact,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UndoAddedStoryItem(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
 enum class OperationStatus {
     COMMITTED,
     REVISION_CONFLICT,
@@ -105,7 +165,13 @@ enum class OperationStatus {
     DUPLICATE_OPERATION,
     INVALID_UNDO_TARGET,
     ALREADY_UNDONE,
-    INVALID_STROKE
+    INVALID_STROKE,
+    INVALID_STORY_ENTITY,
+    INVALID_CANON_FACT,
+    MISSING_CANON_SUBJECT,
+    CANON_CONTRADICTION,
+    DEPENDENCY_EXISTS,
+    DUPLICATE_OBJECT_ID
 }
 
 data class KuroOperationResult(
@@ -118,8 +184,8 @@ data class KuroOperationResult(
 /**
  * Deterministic operation broker for native project objects.
  *
- * This first implementation has no model, disk persistence, plugin access, or arbitrary code
- * execution. Every operation is typed, revision-checked, and recorded in the project audit log.
+ * AI model access and plugin execution are intentionally outside this broker. Every operation
+ * is typed, revision-checked, dependency-checked where needed, and recorded in the audit log.
  */
 class KuroOperationBroker {
     fun execute(
@@ -155,6 +221,9 @@ class KuroOperationBroker {
             is UndoAddedStoryboardPanel -> undoAddedPanel(current, operation)
             is AddCanvasStroke -> addStroke(current, operation)
             is UndoAddedCanvasStroke -> undoAddedStroke(current, operation)
+            is AddStoryEntity -> addStoryEntity(current, operation)
+            is AddCanonFact -> addCanonFact(current, operation)
+            is UndoAddedStoryItem -> undoStoryItem(current, operation)
         }
     }
 
@@ -328,6 +397,198 @@ class KuroOperationBroker {
             project = next,
             message = "Canvas stroke removed and undo recorded in audit log.",
             affectedObjectId = strokeId
+        )
+    }
+
+    private fun addStoryEntity(
+        current: KuroProjectState,
+        operation: AddStoryEntity
+    ): KuroOperationResult {
+        val entity = operation.entity
+        val name = entity.name.trim()
+        if (entity.id.isBlank() || name.isBlank()) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_STORY_ENTITY,
+                current,
+                "A story entity needs a stable ID and a non-empty name."
+            )
+        }
+        if (current.storyEntities.any { it.id == entity.id }) {
+            return KuroOperationResult(
+                OperationStatus.DUPLICATE_OBJECT_ID,
+                current,
+                "This story entity ID already exists."
+            )
+        }
+        if (current.storyEntities.any { it.type == entity.type && it.name.equals(name, ignoreCase = true) }) {
+            return KuroOperationResult(
+                OperationStatus.DUPLICATE_OBJECT_ID,
+                current,
+                "An entity of this type with that name already exists."
+            )
+        }
+        val revision = current.revision + 1
+        val savedEntity = entity.copy(
+            name = name,
+            aliases = entity.aliases.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+            createdRevision = revision
+        )
+        val next = current.copy(
+            revision = revision,
+            storyEntities = current.storyEntities + savedEntity,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_story_entity",
+                targetId = savedEntity.id,
+                summary = "Added story entity: $name."
+            )
+        )
+        return KuroOperationResult(
+            OperationStatus.COMMITTED,
+            next,
+            "Story entity committed to the project.",
+            savedEntity.id
+        )
+    }
+
+    private fun addCanonFact(
+        current: KuroProjectState,
+        operation: AddCanonFact
+    ): KuroOperationResult {
+        val fact = operation.fact
+        if (fact.id.isBlank() || fact.predicate.isBlank() || fact.value.isBlank() ||
+            fact.branchId.isBlank() || fact.fromChapter < 1 ||
+            (fact.untilChapterExclusive != null && fact.untilChapterExclusive <= fact.fromChapter)
+        ) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_CANON_FACT,
+                current,
+                "A canon fact needs a predicate, value, branch and valid chapter interval."
+            )
+        }
+        if (current.storyEntities.none { it.id == fact.subjectId }) {
+            return KuroOperationResult(
+                OperationStatus.MISSING_CANON_SUBJECT,
+                current,
+                "Add or select a story entity before recording facts about it."
+            )
+        }
+        if (current.canonFacts.any { it.id == fact.id }) {
+            return KuroOperationResult(
+                OperationStatus.DUPLICATE_OBJECT_ID,
+                current,
+                "This canon fact ID already exists."
+            )
+        }
+        if (fact.status == KuroCanonFactStatus.CONFIRMED) {
+            val end = fact.untilChapterExclusive ?: Int.MAX_VALUE
+            val conflict = current.canonFacts.firstOrNull { existing ->
+                existing.status == KuroCanonFactStatus.CONFIRMED &&
+                    existing.subjectId == fact.subjectId &&
+                    existing.predicate.equals(fact.predicate.trim(), ignoreCase = true) &&
+                    existing.branchId == fact.branchId &&
+                    !existing.value.equals(fact.value.trim(), ignoreCase = true) &&
+                    fact.fromChapter < (existing.untilChapterExclusive ?: Int.MAX_VALUE) &&
+                    existing.fromChapter < end
+            }
+            if (conflict != null) {
+                return KuroOperationResult(
+                    OperationStatus.CANON_CONTRADICTION,
+                    current,
+                    "This confirmed fact conflicts with another confirmed value over an overlapping chapter range. Resolve or explicitly re-time the old fact first."
+                )
+            }
+        }
+        val revision = current.revision + 1
+        val savedFact = fact.copy(
+            predicate = fact.predicate.trim(),
+            value = fact.value.trim(),
+            branchId = fact.branchId.trim(),
+            sourceNote = fact.sourceNote.trim(),
+            createdRevision = revision
+        )
+        val next = current.copy(
+            revision = revision,
+            canonFacts = current.canonFacts + savedFact,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_canon_fact",
+                targetId = savedFact.id,
+                summary = "Recorded a time-scoped canon fact."
+            )
+        )
+        return KuroOperationResult(
+            OperationStatus.COMMITTED,
+            next,
+            "Canon fact committed to the project.",
+            savedFact.id
+        )
+    }
+
+    private fun undoStoryItem(
+        current: KuroProjectState,
+        operation: UndoAddedStoryItem
+    ): KuroOperationResult {
+        val target = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (target == null || target.action !in setOf("add_story_entity", "add_canon_fact")) {
+            return KuroOperationResult(
+                OperationStatus.INVALID_UNDO_TARGET,
+                current,
+                "Only a newly added story entity or canon fact can be undone here."
+            )
+        }
+        if (current.auditLog.any { it.action == "undo_story_item" && it.targetId == target.targetId }) {
+            return KuroOperationResult(
+                OperationStatus.ALREADY_UNDONE,
+                current,
+                "This story item has already been undone."
+            )
+        }
+        if (target.action == "add_story_entity" &&
+            current.canonFacts.any { it.subjectId == target.targetId && it.status != KuroCanonFactStatus.RETRACTED }
+        ) {
+            return KuroOperationResult(
+                OperationStatus.DEPENDENCY_EXISTS,
+                current,
+                "This entity is referenced by canon facts. Undo or reassign those facts first."
+            )
+        }
+        val revision = current.revision + 1
+        val next = when (target.action) {
+            "add_story_entity" -> current.copy(
+                revision = revision,
+                storyEntities = current.storyEntities.filterNot { it.id == target.targetId },
+                auditLog = current.auditLog + KuroAuditEvent(
+                    operationId = operation.operationId,
+                    revision = revision,
+                    actor = operation.actor,
+                    action = "undo_story_item",
+                    targetId = target.targetId,
+                    summary = "Undid creation of story entity."
+                )
+            )
+            else -> current.copy(
+                revision = revision,
+                canonFacts = current.canonFacts.filterNot { it.id == target.targetId },
+                auditLog = current.auditLog + KuroAuditEvent(
+                    operationId = operation.operationId,
+                    revision = revision,
+                    actor = operation.actor,
+                    action = "undo_story_item",
+                    targetId = target.targetId,
+                    summary = "Undid creation of canon fact."
+                )
+            )
+        }
+        return KuroOperationResult(
+            OperationStatus.COMMITTED,
+            next,
+            "Story item undone and retained in audit history.",
+            target.targetId
         )
     }
 

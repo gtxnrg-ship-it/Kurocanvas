@@ -29,14 +29,43 @@ class KuroProjectPersistenceTest {
             )
         )
         assertEquals(OperationStatus.COMMITTED, strokeResult.status)
+        val entityResult = broker.execute(
+            strokeResult.project,
+            AddStoryEntity(
+                "persist-entity-1",
+                strokeResult.project.projectId,
+                strokeResult.project.revision,
+                KuroStoryEntity("character-1", "Mira"),
+                actor = "test"
+            )
+        )
+        val factResult = broker.execute(
+            entityResult.project,
+            AddCanonFact(
+                "persist-fact-1",
+                entityResult.project.projectId,
+                entityResult.project.revision,
+                KuroCanonFact(
+                    id = "canon-fact-1",
+                    subjectId = "character-1",
+                    predicate = "Hair color",
+                    value = "Black",
+                    fromChapter = 1
+                ),
+                actor = "test"
+            )
+        )
+        assertEquals(OperationStatus.COMMITTED, factResult.status)
 
-        val decoded = KuroProjectCodec.decode(KuroProjectCodec.encode(strokeResult.project))
+        val decoded = KuroProjectCodec.decode(KuroProjectCodec.encode(factResult.project))
 
-        assertEquals(strokeResult.project, decoded)
+        assertEquals(factResult.project, decoded)
         assertEquals("Sample chapter", decoded.title)
         assertEquals(1, decoded.panels.size)
         assertEquals(stroke, decoded.strokes.single())
-        assertEquals(2, decoded.auditLog.size)
+        assertEquals("Mira", decoded.storyEntities.single().name)
+        assertEquals("Black", decoded.canonFacts.single().value)
+        assertEquals(4, decoded.auditLog.size)
     }
 
     @Test

@@ -26,12 +26,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kurocanvas.project.AddCanonFact
 import com.kurocanvas.project.AddCanvasStroke
+import com.kurocanvas.project.AddStoryEntity
 import com.kurocanvas.project.AddStoryboardPanel
 import com.kurocanvas.project.KuroOperationBroker
+import com.kurocanvas.project.KuroCanonFact
 import com.kurocanvas.project.KuroProjectState
 import com.kurocanvas.project.KuroStroke
 import com.kurocanvas.project.KuroStrokePoint
+import com.kurocanvas.project.KuroStoryEntity
+import com.kurocanvas.project.KuroStoryEntityType
 import com.kurocanvas.project.createKuroProjectStorage
 import com.kurocanvas.project.OperationStatus
 import com.kurocanvas.project.UndoAddedCanvasStroke
@@ -131,6 +136,47 @@ fun App(storageRoot: String) {
             )
             if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
         }
+    }
+    val addStoryCharacter: (String) -> OperationStatus = { name ->
+        val nextRevision = project.revision + 1
+        val result = operationBroker.execute(
+            project,
+            AddStoryEntity(
+                operationId = "op-add-entity-$nextRevision",
+                projectId = project.projectId,
+                expectedRevision = project.revision,
+                entity = KuroStoryEntity(
+                    id = "entity-$nextRevision",
+                    name = name,
+                    type = KuroStoryEntityType.CHARACTER
+                )
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
+    }
+    val addCanonFact: (String, String, String, Int, Int?, String) -> OperationStatus = {
+            subjectId, predicate, value, fromChapter, untilChapter, branchId ->
+        val nextRevision = project.revision + 1
+        val result = operationBroker.execute(
+            project,
+            AddCanonFact(
+                operationId = "op-add-canon-$nextRevision",
+                projectId = project.projectId,
+                expectedRevision = project.revision,
+                fact = KuroCanonFact(
+                    id = "fact-$nextRevision",
+                    subjectId = subjectId,
+                    predicate = predicate,
+                    value = value,
+                    branchId = branchId,
+                    fromChapter = fromChapter,
+                    untilChapterExclusive = untilChapter
+                )
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
     }
     var tool by remember { mutableStateOf("Brush") }
     var brushSize by remember { mutableFloatStateOf(4.5f) }
@@ -234,7 +280,7 @@ fun App(storageRoot: String) {
                                     }
                                 }
                             )
-                            Section.Story -> StoryWorkspace()
+                            Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact)
                             Section.Vault -> VaultWorkspace()
                             Section.Style -> PlannedWorkspace("Style Lab", "Define linework, anatomy, palette, rendering and lettering as versioned Style DNA. Preview changes before approval.", "◉")
                             Section.ThreeD -> PlannedWorkspace("3D Studio", "Reusable glTF/GLB assets, real 3D viewports, rigs, cameras, lighting and animation will remain editable project data.", "◇")
@@ -522,32 +568,211 @@ private fun InspectorPanel(strokes: Int, panels: Int, tool: String, revision: Lo
 }
 
 @Composable
-private fun StoryWorkspace() {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(15.dp)) {
+private fun StoryWorkspace(
+    project: KuroProjectState,
+    onAddCharacter: (String) -> OperationStatus,
+    onAddFact: (String, String, String, Int, Int?, String) -> OperationStatus
+) {
+    var characterName by remember(project.projectId) { mutableStateOf("") }
+    var selectedEntityId by remember(project.projectId) {
+        mutableStateOf(project.storyEntities.firstOrNull()?.id.orEmpty())
+    }
+    var predicate by remember { mutableStateOf("Hair color") }
+    var value by remember { mutableStateOf("") }
+    var fromChapter by remember { mutableStateOf("1") }
+    var untilChapter by remember { mutableStateOf("") }
+    var branchId by remember { mutableStateOf("main") }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    val selectedEntity = project.storyEntities.firstOrNull { it.id == selectedEntityId }
+    val entityFacts = project.canonFacts
+        .filter { it.subjectId == selectedEntityId && it.status == com.kurocanvas.project.KuroCanonFactStatus.CONFIRMED }
+        .sortedBy { it.fromChapter }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(15.dp)
+    ) {
         Text("Story workspace", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-        Text("Prose, dialogue, scenes and canon remain separate linked objects.", color = MutedText, fontSize = 13.sp)
+        Text(
+            "Canon is structured project data, not something the chat has to remember.",
+            color = MutedText,
+            fontSize = 13.sp
+        )
         Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Text("CURRENT STORY", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
-                Text("Untitled story", fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                Text("No canon has been added. The project starts empty on purpose.", color = MutedText, fontSize = 12.sp)
-            }
-        }
-        Text("CHAPTER OUTLINE", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
-        repeat(3) { index ->
-            Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("0" + (index + 1), color = Violet, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Chapter " + (index + 1), fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                        Text("Unwritten draft", color = MutedText, fontSize = 11.sp)
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("CHARACTER VAULT", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text("Add a character", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(
+                    value = characterName,
+                    onValueChange = { characterName = it; message = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Character name") },
+                    singleLine = true
+                )
+                Button(
+                    onClick = {
+                        val newId = "entity-${project.revision + 1}"
+                        val status = onAddCharacter(characterName)
+                        message = when (status) {
+                            OperationStatus.COMMITTED -> "Character saved to this project."
+                            OperationStatus.DUPLICATE_OBJECT_ID -> "That character already exists, or the new item ID is not unique."
+                            OperationStatus.INVALID_STORY_ENTITY -> "Enter a character name first."
+                            else -> "Could not save this character: ${status.name.lowercase().replace('_', ' ')}."
+                        }
+                        if (status == OperationStatus.COMMITTED) {
+                            selectedEntityId = newId
+                            characterName = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Add character") }
+                if (project.storyEntities.isEmpty()) {
+                    Text("No characters yet. The story starts empty on purpose.", color = MutedText, fontSize = 12.sp)
+                } else {
+                    Text("PROJECT CHARACTERS", color = MutedText, fontSize = 10.sp, letterSpacing = 1.sp)
+                    project.storyEntities.forEach { entity ->
+                        Surface(
+                            color = if (entity.id == selectedEntityId) Color(0xFF28223F) else Raised,
+                            shape = RoundedCornerShape(11.dp),
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
+                                .clickable { selectedEntityId = entity.id; message = null }
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(entity.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    Text(entity.type.name.lowercase(), color = MutedText, fontSize = 10.sp)
+                                }
+                                if (entity.id == selectedEntityId) StatusPill("SELECTED", Violet)
+                            }
+                        }
                     }
-                    StatusPill("EMPTY", MutedText)
                 }
             }
         }
-        Text("Planned: temporal character states, relationship graphs, organizations, event causality, branches and source-linked canon decisions.", color = MutedText, fontSize = 12.sp, lineHeight = 18.sp)
+
+        Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("TIME-SCOPED CANON", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text(
+                    selectedEntity?.let { "Facts for ${it.name}" } ?: "Select or add a character first",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "Chapter ranges use a start-inclusive, end-exclusive interval. Conflicting confirmed values are rejected instead of silently overwriting canon.",
+                    color = MutedText,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                OutlinedTextField(
+                    value = predicate,
+                    onValueChange = { predicate = it; message = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Fact (e.g. hair color, age, status)") },
+                    singleLine = true,
+                    enabled = selectedEntity != null
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it; message = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Canonical value") },
+                    singleLine = true,
+                    enabled = selectedEntity != null
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = fromChapter,
+                        onValueChange = { fromChapter = it; message = null },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("From chapter") },
+                        singleLine = true,
+                        enabled = selectedEntity != null
+                    )
+                    OutlinedTextField(
+                        value = untilChapter,
+                        onValueChange = { untilChapter = it; message = null },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Until chapter (optional)") },
+                        singleLine = true,
+                        enabled = selectedEntity != null
+                    )
+                }
+                OutlinedTextField(
+                    value = branchId,
+                    onValueChange = { branchId = it; message = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Timeline branch") },
+                    singleLine = true,
+                    enabled = selectedEntity != null
+                )
+                Button(
+                    onClick = {
+                        val startChapter = fromChapter.toIntOrNull()
+                        val endChapter = untilChapter.takeIf { it.isNotBlank() }?.toIntOrNull()
+                        if (selectedEntity == null) {
+                            message = "Select a character before adding a fact."
+                        } else if (startChapter == null || startChapter < 1 ||
+                            (untilChapter.isNotBlank() && endChapter == null) ||
+                            (endChapter != null && endChapter <= startChapter)
+                        ) {
+                            message = "Enter a valid chapter interval. The end chapter must be greater than the start."
+                        } else {
+                            val status = onAddFact(
+                                selectedEntity.id,
+                                predicate,
+                                value,
+                                startChapter,
+                                endChapter,
+                                branchId
+                            )
+                            message = when (status) {
+                                OperationStatus.COMMITTED -> "Fact saved and added to the audit history."
+                                OperationStatus.CANON_CONTRADICTION -> "Canon conflict: a different confirmed value overlaps this chapter range. Re-time the old fact first."
+                                OperationStatus.INVALID_CANON_FACT -> "Enter the fact, value, branch and a valid chapter interval."
+                                OperationStatus.MISSING_CANON_SUBJECT -> "The selected character no longer exists in this project."
+                                else -> "Could not save the fact: ${status.name.lowercase().replace('_', ' ')}."
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = selectedEntity != null
+                ) { Text("Save canon fact") }
+                if (message != null) {
+                    Text(message.orEmpty(), color = if (message.orEmpty().startsWith("Canon conflict")) Amber else MutedText, fontSize = 11.sp)
+                }
+                DividerLine()
+                Text("CONFIRMED FACTS", color = MutedText, fontSize = 10.sp, letterSpacing = 1.sp)
+                if (entityFacts.isEmpty()) {
+                    Text("No confirmed facts for this character yet.", color = MutedText, fontSize = 12.sp)
+                } else {
+                    entityFacts.forEach { fact ->
+                        Surface(color = Raised, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("${fact.predicate}: ${fact.value}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                val endLabel = fact.untilChapterExclusive?.let { "Ch ${it - 1}" } ?: "ongoing"
+                                Text(
+                                    "Ch ${fact.fromChapter}–$endLabel • branch ${fact.branchId}",
+                                    color = MutedText,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Text(
+            "Facts are stored separately from the conversation. They can be resolved by character, property, chapter and branch when Kuro's local context compiler is connected.",
+            color = MutedText,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
     }
 }
 
@@ -613,11 +838,11 @@ private fun KuroPanel(modifier: Modifier = Modifier, onClose: () -> Unit, onAddP
             Surface(color = Color(0xFF10131D), shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Kuro runtime status", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Text("The local model, project memory, voice stack and operation broker are not connected yet. No prompt is sent anywhere from this prototype.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text("The local language model and voice runtime are not connected yet. Project data and drawing operations stay on this device; no prompt is sent anywhere from this prototype.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
             Text("Native-operation preview", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text("This commits a typed storyboard-panel object through the revision-checked operation broker. It updates project revision and audit history, but is still memory-only; disk storage and a local model are not connected yet.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+            Text("This commits a typed storyboard-panel object through the revision-checked operation broker, increments the project revision and audit history, then autosaves the project locally. The language model is still not connected.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
             Button(onClick = onAddPanel, colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink), modifier = Modifier.fillMaxWidth()) {
                 Text("Add storyboard panel • demo tool", fontSize = 12.sp)
             }
