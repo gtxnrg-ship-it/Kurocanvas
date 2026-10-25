@@ -20,7 +20,10 @@ actual fun findInstalledKuroModelPath(
     manifest: KuroModelManifest
 ): String? {
     val file = File(File(rootPath, "models"), manifest.fileName)
-    return file.absolutePath.takeIf { file.isFile && file.length() == manifest.expectedSizeBytes }
+    return file.absolutePath.takeIf {
+        file.isFile && file.length() == manifest.expectedSizeBytes &&
+            runCatching { sha256(file).equals(manifest.sha256, ignoreCase = true) }.getOrDefault(false)
+    }
 }
 
 actual suspend fun downloadKuroModel(
