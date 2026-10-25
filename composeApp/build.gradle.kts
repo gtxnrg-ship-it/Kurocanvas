@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -14,8 +15,11 @@ kotlin {
             dependencies {
                 implementation("org.jetbrains.compose.runtime:runtime:1.12.2")
                 implementation("org.jetbrains.compose.foundation:foundation:1.12.2")
-                implementation("org.jetbrains.compose.material3:material3:1.12.0-alpha03")
+                // 1.9.0 is the stable Compose Multiplatform Material 3 line (Jetpack Material 3 1.4.0).
+                // 1.12.0-alpha03 pulls Jetpack Material 3 1.5.0-alpha22, which requires a newer Android toolchain.
+                implementation("org.jetbrains.compose.material3:material3:1.9.0")
                 implementation("org.jetbrains.compose.ui:ui:1.12.2")
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
             }
         }
 
