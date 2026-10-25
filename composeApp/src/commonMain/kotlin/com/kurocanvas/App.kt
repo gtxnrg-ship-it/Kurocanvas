@@ -63,6 +63,7 @@ import com.kurocanvas.project.RenameProject
 import com.kurocanvas.project.KuroOperationBroker
 import com.kurocanvas.project.KuroCanonFact
 import com.kurocanvas.project.KuroProjectState
+import com.kurocanvas.project.KuroProjectSummary
 import com.kurocanvas.project.KuroStroke
 import com.kurocanvas.project.KuroStrokePoint
 import com.kurocanvas.project.KuroStoryEntity
@@ -156,6 +157,7 @@ fun App(storageRoot: String) {
     var pendingKuroAction by remember { mutableStateOf<KuroNativeActionProposal?>(null) }
     val projectStorage = remember(storageRoot) { createKuroProjectStorage(storageRoot) }
     val initialLoad = remember(projectStorage) { projectStorage.load() }
+    var projectCatalog by remember(projectStorage) { mutableStateOf(projectStorage.listProjects()) }
     val vaultStorage = remember(storageRoot) { createKuroVaultStorage(storageRoot) }
     val initialVaultLoad = remember(vaultStorage) { vaultStorage.load() }
     var vaultIndex by remember(vaultStorage) { mutableStateOf(initialVaultLoad.index) }
@@ -207,17 +209,25 @@ fun App(storageRoot: String) {
             if (it.layers.isEmpty()) it.copy(layers = listOf(KuroLayer.default())) else it
         })
     }
-    var selectedLayerId by remember(projectStorage) {
+    var selectedLayerId by remember(project.projectId) {
         mutableStateOf(project.layers.first().id)
     }
-    var storageWarning by remember(projectStorage) { mutableStateOf(initialLoad.warning) }
-    val projectWritesAllowed = initialLoad.warning == null
+    var storageWarning by remember(projectStorage) { mutableStateOf(initialLoad.warning ?: projectCatalog.warning) }
+    var projectWritesAllowed by remember(projectStorage) {
+        mutableStateOf(initialLoad.warning == null && projectCatalog.warning == null)
+    }
     val operationBroker = remember { KuroOperationBroker() }
     val commitProject: (KuroProjectState) -> Unit = { next ->
         project = next
         if (projectWritesAllowed) {
             val saved = projectStorage.save(next)
-            storageWarning = if (saved.success) null else saved.message
+            if (saved.success) {
+                projectCatalog = projectStorage.listProjects()
+                storageWarning = projectCatalog.warning
+                projectWritesAllowed = projectCatalog.warning == null
+            } else {
+                storageWarning = saved.message
+            }
         }
     }
     val renameProject: (String) -> OperationStatus = { title ->
@@ -556,8 +566,57 @@ fun App(storageRoot: String) {
     }
     var tool by remember { mutableStateOf("Brush") }
     var brushSize by remember { mutableFloatStateOf(4.5f) }
-    var strokes by remember(projectStorage) { mutableStateOf(project.strokes.map { it.toInkStroke() }) }
-    var redoStrokes by remember { mutableStateOf(emptyList<InkStroke>()) }
+    var strokes by remember(project.projectId) { mutableStateOf(project.strokes.map { it.toInkStroke() }) }
+    var redoStrokes by remember(project.projectId) { mutableStateOf(emptyList<InkStroke>()) }
+
+    val switchProject: (String) -> Unit = { targetProjectId ->
+        val result = projectStorage.activateProject(targetProjectId)
+        if (result.state != null && result.warning == null) {
+            val nextState = result.state.let {
+                if (it.layers.isEmpty()) it.copy(layers = listOf(KuroLayer.default())) else it
+            }
+            project = nextState
+            selectedLayerId = nextState.layers.first().id
+            strokes = nextState.strokes.map { it.toInkStroke() }
+            redoStrokes = emptyList()
+            pendingKuroAction = null
+            kuroOutput = ""
+            kuroLastPrompt = ""
+            kuroAssistantStatus = null
+            projectCatalog = projectStorage.listProjects()
+            storageWarning = projectCatalog.warning
+            projectWritesAllowed = projectCatalog.warning == null
+        } else {
+            storageWarning = result.warning ?: "The selected project could not be opened."
+        }
+    }
+    val createProject: (String) -> Unit = { requestedTitle ->
+        if (!projectWritesAllowed) {
+            storageWarning = storageWarning ?: "Project storage is unavailable; no new project was created."
+        } else {
+            var newId: String
+            do {
+                newId = "project-" + kotlin.random.Random.nextLong().toULong().toString(16)
+            } while (newId == project.projectId || projectCatalog.projects.any { it.projectId == newId })
+            val newState = KuroProjectState.empty(projectId = newId, title = requestedTitle)
+            val saved = projectStorage.save(newState)
+            if (saved.success) {
+                project = newState
+                selectedLayerId = newState.layers.first().id
+                strokes = emptyList()
+                redoStrokes = emptyList()
+                pendingKuroAction = null
+                kuroOutput = ""
+                kuroLastPrompt = ""
+                kuroAssistantStatus = null
+                projectCatalog = projectStorage.listProjects()
+                storageWarning = projectCatalog.warning
+                projectWritesAllowed = projectCatalog.warning == null
+            } else {
+                storageWarning = saved.message
+            }
+        }
+    }
 
     MaterialTheme(
         colorScheme = darkColorScheme(
@@ -627,6 +686,16 @@ fun App(storageRoot: String) {
                         }
                     },
                     onKuro = { showKuro = !showKuro }
+                )
+                ProjectSwitcherBar(
+                    currentProjectId = project.projectId,
+                    currentProjectTitle = project.title,
+                    currentRevision = project.revision,
+                    projects = projectCatalog.projects,
+                    enabled = !kuroGenerating && !modelBusy,
+                    canCreateProject = projectWritesAllowed,
+                    onOpenProject = switchProject,
+                    onCreateProject = createProject
                 )
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     if (wide) SideNavigation(section) { section = it }
@@ -818,6 +887,143 @@ private fun TopBar(
             colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
         ) { Text("◉ Kuro", fontWeight = FontWeight.SemiBold, fontSize = 12.sp) }
+    }
+}
+
+@Composable
+private fun ProjectSwitcherBar(
+    currentProjectId: String,
+    currentProjectTitle: String,
+    currentRevision: Long,
+    projects: List<KuroProjectSummary>,
+    enabled: Boolean,
+    canCreateProject: Boolean,
+    onOpenProject: (String) -> Unit,
+    onCreateProject: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var titleDraft by remember { mutableStateOf("Untitled project") }
+    var titleError by remember { mutableStateOf<String?>(null) }
+
+    val activeProject = KuroProjectSummary(
+        projectId = currentProjectId,
+        title = currentProjectTitle,
+        revision = currentRevision,
+        updatedAtEpochMillis = Long.MAX_VALUE
+    )
+    val choices = listOf(activeProject) + projects
+        .filterNot { it.projectId == currentProjectId }
+        .sortedByDescending { it.updatedAtEpochMillis }
+
+    if (showCreateDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showCreateDialog = false
+                titleError = null
+            },
+            title = { Text("Create project") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Each project keeps its own story, panels, canon, timeline and revision history.",
+                        color = MutedText,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+                    OutlinedTextField(
+                        value = titleDraft,
+                        onValueChange = {
+                            titleDraft = it
+                            titleError = null
+                        },
+                        label = { Text("Project title") },
+                        singleLine = true
+                    )
+                    if (titleError != null) {
+                        Text(titleError.orEmpty(), color = Amber, fontSize = 11.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val trimmed = titleDraft.trim()
+                    if (trimmed.isEmpty() || trimmed.length > 120) {
+                        titleError = "Use 1–120 characters for the project title."
+                    } else {
+                        onCreateProject(trimmed)
+                        showCreateDialog = false
+                        titleDraft = "Untitled project"
+                        titleError = null
+                    }
+                }, enabled = canCreateProject) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showCreateDialog = false
+                    titleError = null
+                }) { Text("Cancel") }
+            }
+        )
+    }
+
+    Row(
+        Modifier.fillMaxWidth().background(Panel).border(1.dp, Line)
+            .padding(horizontal = 12.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("PROJECT", color = MutedText, fontSize = 9.sp, letterSpacing = 1.1.sp)
+        Text(
+            currentProjectTitle,
+            modifier = Modifier.weight(1f),
+            color = PrimaryText,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Box {
+            TextButton(onClick = { expanded = true }, enabled = enabled) {
+                Text("Switch ▾", color = if (enabled) Cyan else MutedText, fontSize = 10.sp)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                choices.forEach { projectOption ->
+                    DropdownMenuItem(
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    projectOption.title,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (projectOption.projectId == currentProjectId) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                                Text(
+                                    if (projectOption.projectId == currentProjectId) "ACTIVE · revision ${projectOption.revision}"
+                                    else "LOCAL · revision ${projectOption.revision}",
+                                    color = MutedText,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        },
+                        enabled = enabled && projectOption.projectId != currentProjectId,
+                        onClick = {
+                            expanded = false
+                            onOpenProject(projectOption.projectId)
+                        }
+                    )
+                }
+                DividerLine()
+                DropdownMenuItem(
+                    text = { Text("+ New project", color = if (canCreateProject) Cyan else MutedText) },
+                    enabled = enabled && canCreateProject,
+                    onClick = {
+                        expanded = false
+                        titleDraft = "Untitled project"
+                        titleError = null
+                        showCreateDialog = true
+                    }
+                )
+            }
+        }
     }
 }
 

@@ -7,7 +7,7 @@ Kuro Canvas is not an image generator or a chatbot wrapped around a canvas. The 
 ## Current working foundation
 
 - **Build:** Android debug APK and desktop target are verified by GitHub Actions CI.
-- **Local metadata:** SQLite-backed project state and Vault index, transactional writes, a schema-versioned database, and one-time import from legacy `project.json` / `vault-index.json` files. Legacy source files are preserved after migration. The current store has one active project payload; a multi-project library and normalized graph tables remain future work.
+- **Local metadata and projects:** SQLite-backed multi-project catalog, isolated project/story state, active-project selection, transactional writes, schema migration, and one-time import from legacy `project.json` / `vault-index.json` files. Legacy source files are preserved after migration. Story entities and facts are currently serialized as project payloads; normalized graph tables remain future work.
 - **Editable canvas:** normalized brush-stroke geometry with color, width and layer references; typed operations with revision checks, audit events and undo.
 - **Layers:** layer creation/settings, visibility, locking, opacity, selection and dependency-safe removal are wired into the drawing workspace.
 - **Story canon and graph:** typed character/location/organization/object/event records, time-scoped facts, relationship edges and chapter events are stored as project data. Character profile snapshots resolve age, height, hair, clothing, status and other traits by chapter/branch; unknowns and conflicts stay visible.

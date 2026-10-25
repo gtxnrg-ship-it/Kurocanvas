@@ -15,9 +15,28 @@ data class KuroStorageWriteResult(
     val message: String
 )
 
+data class KuroProjectSummary(
+    val projectId: String,
+    val title: String,
+    val revision: Long,
+    val updatedAtEpochMillis: Long
+)
+
+data class KuroProjectCatalogReadResult(
+    val projects: List<KuroProjectSummary>,
+    val activeProjectId: String? = null,
+    val warning: String? = null
+)
+
 interface KuroProjectStorage {
+    /** Loads the currently active project; if none is selected, the most recently saved project. */
     fun load(): KuroStorageReadResult
+    /** Saves this project and makes it the active project. */
     fun save(state: KuroProjectState): KuroStorageWriteResult
+    /** Lists metadata for all projects without switching the active one. */
+    fun listProjects(): KuroProjectCatalogReadResult
+    /** Switches to an existing project. Missing or invalid projects are never replaced. */
+    fun activateProject(projectId: String): KuroStorageReadResult
 }
 
 object KuroProjectCodec {

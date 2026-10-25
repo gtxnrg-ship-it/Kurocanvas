@@ -16,7 +16,7 @@ private class SqliteKuroProjectStorage(private val rootPath: String) : KuroProje
         }
         try {
             val connection = openKuroDatabase(rootPath)
-            val stored = try { readStoredProject(connection) } finally { connection.close() }
+            val stored = try { readActiveProject(connection) } finally { connection.close() }
             if (stored != null) return stored
         } catch (error: Exception) {
             return KuroStorageReadResult(
@@ -58,22 +58,21 @@ private class SqliteKuroProjectStorage(private val rootPath: String) : KuroProje
                 connection.autoCommit = false
                 try {
                     connection.prepareStatement(
-                        "INSERT INTO project_state " +
-                            "(singleton_id, schema_version, project_id, revision, payload, updated_at_epoch_ms) " +
-                            "VALUES (1, 1, ?, ?, ?, ?) " +
-                            "ON CONFLICT(singleton_id) DO UPDATE SET " +
-                            "schema_version = excluded.schema_version, project_id = excluded.project_id, " +
-                            "revision = excluded.revision, payload = excluded.payload, " +
-                            "updated_at_epoch_ms = excluded.updated_at_epoch_ms"
+                        "INSERT INTO projects (project_id,title,revision,payload,updated_at_epoch_ms) " +
+                            "VALUES (?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET " +
+                            "title=excluded.title, revision=excluded.revision, payload=excluded.payload, " +
+                            "updated_at_epoch_ms=excluded.updated_at_epoch_ms"
                     ).use { statement ->
                         statement.setString(1, state.projectId)
-                        statement.setLong(2, state.revision)
-                        statement.setString(3, KuroProjectCodec.encode(state))
-                        statement.setLong(4, System.currentTimeMillis())
+                        statement.setString(2, state.title)
+                        statement.setLong(3, state.revision)
+                        statement.setString(4, KuroProjectCodec.encode(state))
+                        statement.setLong(5, System.currentTimeMillis())
                         if (statement.executeUpdate() != 1) {
                             throw IllegalStateException("SQLite did not store the project state.")
                         }
                     }
+                    setActiveProject(connection, state.projectId)
                     connection.commit()
                 } catch (error: Exception) {
                     connection.rollback()
@@ -84,7 +83,7 @@ private class SqliteKuroProjectStorage(private val rootPath: String) : KuroProje
             } finally {
                 connection.close()
             }
-            KuroStorageWriteResult(true, "Saved to the local SQLite database.")
+            KuroStorageWriteResult(true, "Saved to the local SQLite project catalog.")
         } catch (error: Exception) {
             KuroStorageWriteResult(
                 false,
@@ -94,20 +93,130 @@ private class SqliteKuroProjectStorage(private val rootPath: String) : KuroProje
         }
     }
 
-    private fun readStoredProject(connection: Connection): KuroStorageReadResult? =
-        connection.prepareStatement("SELECT payload FROM project_state WHERE singleton_id = 1").use { statement ->
-            statement.executeQuery().use { result ->
-                if (!result.next()) return null
-                try {
-                    KuroStorageReadResult(KuroProjectCodec.decode(result.getString(1)), found = true)
-                } catch (error: Exception) {
-                    KuroStorageReadResult(
+    override fun listProjects(): KuroProjectCatalogReadResult {
+        return try {
+            val connection = openKuroDatabase(rootPath)
+            try {
+                val activeId = activeProjectId(connection)
+                val projects = connection.prepareStatement(
+                    "SELECT project_id,title,revision,updated_at_epoch_ms FROM projects " +
+                        "ORDER BY updated_at_epoch_ms DESC, title COLLATE NOCASE ASC"
+                ).use { statement ->
+                    statement.executeQuery().use { result ->
+                        buildList {
+                            while (result.next()) {
+                                add(KuroProjectSummary(
+                                    projectId = result.getString(1),
+                                    title = result.getString(2),
+                                    revision = result.getLong(3),
+                                    updatedAtEpochMillis = result.getLong(4)
+                                ))
+                            }
+                        }
+                    }
+                }
+                KuroProjectCatalogReadResult(projects, activeId)
+            } finally {
+                connection.close()
+            }
+        } catch (error: Exception) {
+            KuroProjectCatalogReadResult(
+                projects = emptyList(),
+                warning = "The project catalog could not be read. " +
+                    (error.message ?: error::class.simpleName ?: "storage error")
+            )
+        }
+    }
+
+    override fun activateProject(projectId: String): KuroStorageReadResult {
+        return try {
+            val connection = openKuroDatabase(rootPath)
+            try {
+                val result = readProjectById(connection, projectId)
+                    ?: return KuroStorageReadResult(
                         state = null,
                         found = true,
-                        warning = "The stored project payload is invalid and was preserved. " +
-                            (error.message ?: error::class.simpleName ?: "invalid data")
+                        warning = "That project is no longer available in the local catalog."
                     )
+                val state = result.state ?: return result
+                connection.autoCommit = false
+                try {
+                    setActiveProject(connection, state.projectId)
+                    connection.commit()
+                } catch (error: Exception) {
+                    connection.rollback()
+                    throw error
+                } finally {
+                    connection.autoCommit = true
                 }
+                result
+            } finally {
+                connection.close()
+            }
+        } catch (error: Exception) {
+            KuroStorageReadResult(
+                state = null,
+                found = true,
+                warning = "Could not open the selected project. " +
+                    (error.message ?: error::class.simpleName ?: "storage error")
+            )
+        }
+    }
+
+    private fun readActiveProject(connection: Connection): KuroStorageReadResult? {
+        val activeId = activeProjectId(connection)
+        if (activeId != null) {
+            val active = readProjectById(connection, activeId)
+            if (active != null) return active
+        }
+        val latest = connection.prepareStatement(
+            "SELECT project_id,payload FROM projects ORDER BY updated_at_epoch_ms DESC LIMIT 1"
+        ).use { statement ->
+            statement.executeQuery().use { result ->
+                if (!result.next()) null else result.getString(1) to result.getString(2)
+            }
+        } ?: return null
+        val decoded = decodeProject(latest.second)
+        if (decoded.state != null && decoded.warning == null && activeId != decoded.state.projectId) {
+            connection.autoCommit = false
+            try {
+                setActiveProject(connection, decoded.state.projectId)
+                connection.commit()
+            } catch (error: Exception) {
+                connection.rollback()
+                throw error
+            } finally {
+                connection.autoCommit = true
+            }
+        }
+        return decoded
+    }
+
+    private fun readProjectById(connection: Connection, projectId: String): KuroStorageReadResult? =
+        connection.prepareStatement("SELECT payload FROM projects WHERE project_id = ?").use { statement ->
+            statement.setString(1, projectId)
+            statement.executeQuery().use { result ->
+                if (!result.next()) null else decodeProject(result.getString(1))
+            }
+        }
+
+    private fun decodeProject(payload: String): KuroStorageReadResult {
+        return try {
+            KuroStorageReadResult(KuroProjectCodec.decode(payload), found = true)
+        } catch (error: Exception) {
+            KuroStorageReadResult(
+                state = null,
+                found = true,
+                warning = "The selected project's saved data is invalid and was preserved. " +
+                    (error.message ?: error::class.simpleName ?: "invalid data")
+            )
+        }
+    }
+
+    private fun activeProjectId(connection: Connection): String? =
+        connection.prepareStatement("SELECT active_project_id FROM app_settings WHERE singleton_id = 1").use { statement ->
+            statement.executeQuery().use { result ->
+                if (result.next()) result.getString(1) else null
             }
         }
 }
