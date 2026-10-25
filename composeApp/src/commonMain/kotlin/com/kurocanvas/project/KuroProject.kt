@@ -20,13 +20,29 @@ data class KuroAuditEvent(
 )
 
 @Serializable
+data class KuroStrokePoint(
+    val x: Float,
+    val y: Float
+)
+
+@Serializable
+data class KuroStroke(
+    val id: String,
+    val points: List<KuroStrokePoint>,
+    val colorArgb: Int,
+    /** Width as a fraction of the drawing area's shorter dimension. */
+    val widthRatio: Float
+)
+
+@Serializable
 data class KuroProjectState(
     val projectId: String,
     val title: String,
     val revision: Long,
     val panels: List<StoryboardPanel>,
     val auditLog: List<KuroAuditEvent>,
-    val nextPanelNumber: Int
+    val nextPanelNumber: Int,
+    val strokes: List<KuroStroke> = emptyList()
 ) {
     companion object {
         fun empty(
@@ -38,7 +54,8 @@ data class KuroProjectState(
             revision = 0L,
             panels = emptyList(),
             auditLog = emptyList(),
-            nextPanelNumber = 1
+            nextPanelNumber = 1,
+            strokes = emptyList()
         )
     }
 }
@@ -65,13 +82,30 @@ data class UndoAddedStoryboardPanel(
     override val actor: String = "user"
 ) : KuroOperation
 
+data class AddCanvasStroke(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val stroke: KuroStroke,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UndoAddedCanvasStroke(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
 enum class OperationStatus {
     COMMITTED,
     REVISION_CONFLICT,
     WRONG_PROJECT,
     DUPLICATE_OPERATION,
     INVALID_UNDO_TARGET,
-    ALREADY_UNDONE
+    ALREADY_UNDONE,
+    INVALID_STROKE
 }
 
 data class KuroOperationResult(
@@ -119,6 +153,8 @@ class KuroOperationBroker {
         return when (operation) {
             is AddStoryboardPanel -> addPanel(current, operation)
             is UndoAddedStoryboardPanel -> undoAddedPanel(current, operation)
+            is AddCanvasStroke -> addStroke(current, operation)
+            is UndoAddedCanvasStroke -> undoAddedStroke(current, operation)
         }
     }
 
@@ -203,4 +239,96 @@ class KuroOperationBroker {
             affectedObjectId = panelId
         )
     }
+    private fun addStroke(
+        current: KuroProjectState,
+        operation: AddCanvasStroke
+    ): KuroOperationResult {
+        val stroke = operation.stroke
+        if (stroke.points.size < 2 ||
+            stroke.points.any { !it.x.isFinite() || !it.y.isFinite() || it.x !in 0f..1f || it.y !in 0f..1f } ||
+            !stroke.widthRatio.isFinite() || stroke.widthRatio <= 0f ||
+            stroke.colorArgb ushr 24 == 0
+        ) {
+            return KuroOperationResult(
+                status = OperationStatus.INVALID_STROKE,
+                project = current,
+                message = "The stroke must contain finite normalized points and a positive width."
+            )
+        }
+        if (current.strokes.any { it.id == stroke.id }) {
+            return KuroOperationResult(
+                status = OperationStatus.DUPLICATE_OPERATION,
+                project = current,
+                message = "A stroke with this ID already exists."
+            )
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            revision = revision,
+            strokes = current.strokes + stroke,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_canvas_stroke",
+                targetId = stroke.id,
+                summary = "Added editable canvas stroke."
+            )
+        )
+        return KuroOperationResult(
+            status = OperationStatus.COMMITTED,
+            project = next,
+            message = "Canvas stroke saved to project state.",
+            affectedObjectId = stroke.id
+        )
+    }
+
+    private fun undoAddedStroke(
+        current: KuroProjectState,
+        operation: UndoAddedCanvasStroke
+    ): KuroOperationResult {
+        val targetEvent = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (targetEvent == null || targetEvent.action != "add_canvas_stroke") {
+            return KuroOperationResult(
+                status = OperationStatus.INVALID_UNDO_TARGET,
+                project = current,
+                message = "Only a committed canvas-stroke operation can be undone by this command."
+            )
+        }
+        val strokeId = targetEvent.targetId
+        if (current.auditLog.any { it.action == "undo_add_canvas_stroke" && it.targetId == strokeId }) {
+            return KuroOperationResult(
+                status = OperationStatus.ALREADY_UNDONE,
+                project = current,
+                message = "This canvas stroke has already been undone."
+            )
+        }
+        if (current.strokes.none { it.id == strokeId }) {
+            return KuroOperationResult(
+                status = OperationStatus.INVALID_UNDO_TARGET,
+                project = current,
+                message = "The target stroke no longer exists in the current project state."
+            )
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            revision = revision,
+            strokes = current.strokes.filterNot { it.id == strokeId },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "undo_add_canvas_stroke",
+                targetId = strokeId,
+                summary = "Undid creation of canvas stroke."
+            )
+        )
+        return KuroOperationResult(
+            status = OperationStatus.COMMITTED,
+            project = next,
+            message = "Canvas stroke removed and undo recorded in audit log.",
+            affectedObjectId = strokeId
+        )
+    }
+
 }

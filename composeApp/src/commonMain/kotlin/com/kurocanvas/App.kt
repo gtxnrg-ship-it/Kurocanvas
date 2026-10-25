@@ -26,11 +26,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kurocanvas.project.AddCanvasStroke
 import com.kurocanvas.project.AddStoryboardPanel
 import com.kurocanvas.project.KuroOperationBroker
 import com.kurocanvas.project.KuroProjectState
+import com.kurocanvas.project.KuroStroke
+import com.kurocanvas.project.KuroStrokePoint
 import com.kurocanvas.project.createKuroProjectStorage
 import com.kurocanvas.project.OperationStatus
+import com.kurocanvas.project.UndoAddedCanvasStroke
 import com.kurocanvas.project.UndoAddedStoryboardPanel
 
 private val Ink = Color(0xFF0A0C13)
@@ -49,7 +53,33 @@ private enum class Section(val label: String, val glyph: String) {
     Style("Style Lab", "◉"), ThreeD("3D", "◇"), Research("Research", "⌕"), Publish("Publish", "↗")
 }
 
-private data class InkStroke(val points: List<Offset>, val color: Color, val width: Float)
+private data class InkStroke(val points: List<Offset>, val color: Color, val widthRatio: Float)
+
+private fun Int.toStudioColor(): Color = Color(
+    red = ((this ushr 16) and 0xFF) / 255f,
+    green = ((this ushr 8) and 0xFF) / 255f,
+    blue = (this and 0xFF) / 255f,
+    alpha = ((this ushr 24) and 0xFF) / 255f
+)
+
+private fun Color.toArgbInt(): Int =
+    ((alpha * 255f).toInt().coerceIn(0, 255) shl 24) or
+        ((red * 255f).toInt().coerceIn(0, 255) shl 16) or
+        ((green * 255f).toInt().coerceIn(0, 255) shl 8) or
+        (blue * 255f).toInt().coerceIn(0, 255)
+
+private fun KuroStroke.toInkStroke(): InkStroke = InkStroke(
+    points = points.map { Offset(it.x, it.y) },
+    color = colorArgb.toStudioColor(),
+    widthRatio = widthRatio
+)
+
+private fun InkStroke.toKuroStroke(id: String): KuroStroke = KuroStroke(
+    id = id,
+    points = points.map { KuroStrokePoint(it.x, it.y) },
+    colorArgb = color.toArgbInt(),
+    widthRatio = widthRatio
+)
 
 @Composable
 fun App(storageRoot: String) {
@@ -99,12 +129,12 @@ fun App(storageRoot: String) {
                     actor = "user"
                 )
             )
-            if (result.status == OperationStatus.COMMITTED) project = result.project
+            if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
         }
     }
     var tool by remember { mutableStateOf("Brush") }
     var brushSize by remember { mutableFloatStateOf(4.5f) }
-    var strokes by remember { mutableStateOf(emptyList<InkStroke>()) }
+    var strokes by remember(projectStorage) { mutableStateOf(project.strokes.map { it.toInkStroke() }) }
     var redoStrokes by remember { mutableStateOf(emptyList<InkStroke>()) }
 
     MaterialTheme(
@@ -127,17 +157,49 @@ fun App(storageRoot: String) {
                 TopBar(
                     wide = wide,
                     onUndo = {
-                        if (strokes.isNotEmpty()) {
-                            redoStrokes = redoStrokes + strokes.last()
-                            strokes = strokes.dropLast(1)
+                        val lastStroke = project.strokes.lastOrNull()
+                        if (lastStroke != null) {
+                            val addEvent = project.auditLog.lastOrNull {
+                                it.action == "add_canvas_stroke" && it.targetId == lastStroke.id
+                            }
+                            if (addEvent != null) {
+                                val result = operationBroker.execute(
+                                    project,
+                                    UndoAddedCanvasStroke(
+                                        operationId = "op-undo-stroke-${project.revision + 1}",
+                                        projectId = project.projectId,
+                                        expectedRevision = project.revision,
+                                        targetOperationId = addEvent.operationId
+                                    )
+                                )
+                                if (result.status == OperationStatus.COMMITTED) {
+                                    redoStrokes = redoStrokes + lastStroke.toInkStroke()
+                                    commitProject(result.project)
+                                    strokes = result.project.strokes.map { it.toInkStroke() }
+                                }
+                            }
                         } else {
                             undoLastStoryboardPanel()
                         }
                     },
                     onRedo = {
-                        if (redoStrokes.isNotEmpty()) {
-                            strokes = strokes + redoStrokes.last()
-                            redoStrokes = redoStrokes.dropLast(1)
+                        val redo = redoStrokes.lastOrNull()
+                        if (redo != null) {
+                            val newStroke = redo.toKuroStroke("stroke-${project.revision + 1}")
+                            val result = operationBroker.execute(
+                                project,
+                                AddCanvasStroke(
+                                    operationId = "op-add-stroke-${project.revision + 1}",
+                                    projectId = project.projectId,
+                                    expectedRevision = project.revision,
+                                    stroke = newStroke
+                                )
+                            )
+                            if (result.status == OperationStatus.COMMITTED) {
+                                commitProject(result.project)
+                                strokes = result.project.strokes.map { it.toInkStroke() }
+                                redoStrokes = redoStrokes.dropLast(1)
+                            }
                         }
                     },
                     onKuro = { showKuro = !showKuro }
@@ -154,9 +216,22 @@ fun App(storageRoot: String) {
                                 onTool = { tool = it },
                                 brushSize = brushSize,
                                 onBrushSize = { brushSize = it },
-                                onStroke = {
-                                    strokes = strokes + it
-                                    redoStrokes = emptyList()
+                                onStroke = { newInkStroke ->
+                                    val nativeStroke = newInkStroke.toKuroStroke("stroke-${project.revision + 1}")
+                                    val result = operationBroker.execute(
+                                        project,
+                                        AddCanvasStroke(
+                                            operationId = "op-add-stroke-${project.revision + 1}",
+                                            projectId = project.projectId,
+                                            expectedRevision = project.revision,
+                                            stroke = nativeStroke
+                                        )
+                                    )
+                                    if (result.status == OperationStatus.COMMITTED) {
+                                        commitProject(result.project)
+                                        strokes = result.project.strokes.map { it.toInkStroke() }
+                                        redoStrokes = emptyList()
+                                    }
                                 }
                             )
                             Section.Story -> StoryWorkspace()
@@ -285,9 +360,9 @@ private fun CreateWorkspace(
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Canvas", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("Editable in-memory strokes • persistence not connected", color = MutedText, fontSize = 10.sp)
+                Text("Editable strokes • autosaved to this device", color = MutedText, fontSize = 10.sp)
             }
-            StatusPill("Not saved", Amber)
+            StatusPill("Local autosave", Green)
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf("Brush", "Eraser").forEach { label -> ToolChip(label, label == tool) { onTool(label) } }
@@ -348,10 +423,17 @@ private fun SketchCanvas(
 ) {
     Canvas(
         modifier.background(Color(0xFF111522)).pointerInput(brushSize, eraser) {
+            val canvasWidth = size.width.coerceAtLeast(1).toFloat()
+            val canvasHeight = size.height.coerceAtLeast(1).toFloat()
+            val minDimension = minOf(canvasWidth, canvasHeight).coerceAtLeast(1f)
+            fun normalized(point: Offset) = Offset(
+                (point.x / canvasWidth).coerceIn(0f, 1f),
+                (point.y / canvasHeight).coerceIn(0f, 1f)
+            )
             var draft = emptyList<Offset>()
             detectDragGestures(
                 onDragStart = { point ->
-                    draft = listOf(point)
+                    draft = listOf(normalized(point))
                     onLivePoints(draft)
                 },
                 onDragEnd = {
@@ -359,7 +441,7 @@ private fun SketchCanvas(
                         InkStroke(
                             points = draft,
                             color = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B),
-                            width = if (eraser) brushSize * 3f else brushSize
+                            widthRatio = (if (eraser) brushSize * 3f else brushSize) / minDimension
                         )
                     )
                     draft = emptyList()
@@ -371,7 +453,7 @@ private fun SketchCanvas(
                 },
                 onDrag = { change, _ ->
                     change.consume()
-                    draft = draft + change.position
+                    draft = draft + normalized(change.position)
                     onLivePoints(draft)
                 }
             )
@@ -401,14 +483,17 @@ private fun SketchCanvas(
         }
         val previewColor = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B)
         val visibleStrokes = if (livePoints.isNotEmpty()) {
-            strokes + InkStroke(livePoints, previewColor, if (eraser) brushSize * 3f else brushSize)
+            strokes + InkStroke(livePoints, previewColor, (if (eraser) brushSize * 3f else brushSize) / minOf(size.width, size.height).coerceAtLeast(1f))
         } else {
             strokes
         }
+        val minDimension = minOf(size.width, size.height)
         visibleStrokes.forEach { stroke ->
-            if (stroke.points.size == 1) drawCircle(stroke.color, 2.2f, stroke.points.first())
-            for (pointIndex in 0 until stroke.points.lastIndex) {
-                drawLine(stroke.color, stroke.points[pointIndex], stroke.points[pointIndex + 1], stroke.width, StrokeCap.Round)
+            val points = stroke.points.map { Offset(it.x * size.width, it.y * size.height) }
+            val width = (stroke.widthRatio * minDimension).coerceAtLeast(1f)
+            if (points.size == 1) drawCircle(stroke.color, width / 2f, points.first())
+            for (pointIndex in 0 until points.lastIndex) {
+                drawLine(stroke.color, points[pointIndex], points[pointIndex + 1], width, StrokeCap.Round)
             }
         }
     }
@@ -429,8 +514,8 @@ private fun InspectorPanel(strokes: Int, panels: Int, tool: String, revision: Lo
         DetailRow("Audit events", auditCount.toString())
         DividerLine()
         Text("Project status", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-        StatusPill("Persistence pending", Amber)
-        Text("This shell keeps edits in memory only. Project storage, recovery and version history are not wired yet.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+        StatusPill("Local project", Green)
+        Text("Panel operations and editable strokes are saved locally with revision and undo history.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
         Spacer(Modifier.weight(1f))
         Text("Kuro Canvas • UI foundation", color = MutedText, fontSize = 10.sp)
     }
