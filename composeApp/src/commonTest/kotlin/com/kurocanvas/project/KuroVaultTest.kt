@@ -37,4 +37,28 @@ class KuroVaultTest {
         assertEquals(KuroAssetKind.IMAGE_2D, inferKuroAssetKind("page.ora", "application/octet-stream"))
         assertEquals(KuroAssetKind.FONT, inferKuroAssetKind("studio.otf", "application/octet-stream"))
     }
+
+    @Test
+    fun sourceAndLicenseMetadataRoundTrip() {
+        val asset = KuroVaultAsset(
+            id = "asset-rights",
+            name = "background.png",
+            kind = KuroAssetKind.IMAGE_2D,
+            mimeType = "image/png",
+            relativePath = "vault/assets/rights.png",
+            sha256 = "abc987",
+            byteSize = 2048L,
+            tags = listOf("background", "night"),
+            licenseId = "CC BY 4.0",
+            licenseUrl = "https://creativecommons.org/licenses/by/4.0/",
+            attribution = "Artist Name",
+            sourceReference = "https://example.invalid/source-page",
+            importedAtEpochMillis = 456789L
+        )
+        val decoded = KuroVaultCodec.decode(
+            KuroVaultCodec.encode(KuroVaultIndex(assets = listOf(asset)))
+        )
+        assertEquals(asset, decoded.assets.single())
+    }
+
 }

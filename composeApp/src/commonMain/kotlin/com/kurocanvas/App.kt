@@ -125,6 +125,23 @@ fun App(storageRoot: String) {
             vaultMessage = "The Vault index needs repair. Import was not indexed, and the existing index was preserved."
         }
     }
+    val onVaultMetadataUpdate: (KuroVaultAsset) -> Unit = { updated ->
+        if (!vaultWritesAllowed) {
+            vaultMessage = "The Vault index needs repair before metadata can be changed."
+        } else {
+            val nextIndex = vaultIndex.copy(
+                assets = vaultIndex.assets.map { if (it.id == updated.id) updated else it }
+            )
+            val saved = vaultStorage.save(nextIndex)
+            if (saved.success) {
+                vaultIndex = nextIndex
+                vaultMessage = "Saved metadata for ${updated.name}."
+            } else {
+                vaultWarning = saved.message
+                vaultMessage = saved.message
+            }
+        }
+    }
     var project by remember(projectStorage) {
         mutableStateOf(initialLoad.state ?: KuroProjectState.empty())
     }
@@ -314,7 +331,7 @@ fun App(storageRoot: String) {
                                 }
                             )
                             Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact)
-                            Section.Vault -> VaultWorkspace(vaultIndex, vaultWarning, vaultMessage, storageRoot, vaultWritesAllowed, onVaultImportResult)
+                            Section.Vault -> VaultWorkspace(vaultIndex, vaultWarning, vaultMessage, storageRoot, vaultWritesAllowed, onVaultImportResult, onVaultMetadataUpdate)
                             Section.Style -> PlannedWorkspace("Style Lab", "Define linework, anatomy, palette, rendering and lettering as versioned Style DNA. Preview changes before approval.", "◉")
                             Section.ThreeD -> PlannedWorkspace("3D Studio", "Reusable glTF/GLB assets, real 3D viewports, rigs, cameras, lighting and animation will remain editable project data.", "◇")
                             Section.Research -> PlannedWorkspace("Research", "Keep sources, claims, contradictions and provenance linked. Research stays a proposal until you approve it.", "⌕")
@@ -816,9 +833,27 @@ private fun VaultWorkspace(
     message: String?,
     storageRoot: String,
     importEnabled: Boolean,
-    onImported: (KuroVaultAsset?, String?) -> Unit
+    onImported: (KuroVaultAsset?, String?) -> Unit,
+    onUpdateAsset: (KuroVaultAsset) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
+    var selectedAssetId by remember { mutableStateOf<String?>(null) }
+    val selectedAsset = index.assets.firstOrNull { it.id == selectedAssetId }
+    var licenseId by remember(selectedAsset?.id, selectedAsset?.licenseId) {
+        mutableStateOf(selectedAsset?.licenseId.orEmpty())
+    }
+    var licenseUrl by remember(selectedAsset?.id, selectedAsset?.licenseUrl) {
+        mutableStateOf(selectedAsset?.licenseUrl.orEmpty())
+    }
+    var attribution by remember(selectedAsset?.id, selectedAsset?.attribution) {
+        mutableStateOf(selectedAsset?.attribution.orEmpty())
+    }
+    var sourceReference by remember(selectedAsset?.id, selectedAsset?.sourceReference) {
+        mutableStateOf(selectedAsset?.sourceReference.orEmpty())
+    }
+    var tags by remember(selectedAsset?.id, selectedAsset?.tags) {
+        mutableStateOf(selectedAsset?.tags?.joinToString(", ").orEmpty())
+    }
     val visibleAssets = index.assets.filter { asset ->
         query.isBlank() ||
             asset.name.contains(query, ignoreCase = true) ||
@@ -898,7 +933,12 @@ private fun VaultWorkspace(
             )
             Text("${visibleAssets.size} matching asset(s)", color = MutedText, fontSize = 11.sp)
             visibleAssets.forEach { asset ->
-                Surface(color = Panel, shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    color = if (asset.id == selectedAssetId) Color(0xFF28223F) else Panel,
+                    shape = RoundedCornerShape(15.dp),
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
+                        .clickable { selectedAssetId = asset.id }
+                ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -907,15 +947,85 @@ private fun VaultWorkspace(
                             }
                             StatusPill(if (asset.licenseId == "UNREVIEWED") "LICENSE REVIEW" else asset.licenseId, if (asset.licenseId == "UNREVIEWED") Amber else Green)
                         }
-                        Text("${asset.mimeType} • ${(asset.byteSize / 1024).coerceAtLeast(1)} KB", color = MutedText, fontSize = 10.sp)
+                        Text("${asset.mimeType} • ${formatVaultSize(asset.byteSize)}", color = MutedText, fontSize = 10.sp)
                         Text("Path: ${asset.relativePath}", color = MutedText, fontSize = 10.sp)
                         Text("SHA-256: ${asset.sha256}", color = MutedText, fontSize = 9.sp)
                         if (asset.tags.isNotEmpty()) Text(asset.tags.joinToString(" · "), color = Cyan, fontSize = 10.sp)
+                        Text("Select to edit license and provenance metadata.", color = MutedText, fontSize = 10.sp)
+                    }
+                }
+            }
+            if (selectedAsset != null) {
+                Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Text("ASSET RIGHTS & PROVENANCE", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                        Text(selectedAsset.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        OutlinedTextField(
+                            value = licenseId,
+                            onValueChange = { licenseId = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("License identifier (e.g. CC BY 4.0)") },
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = licenseUrl,
+                            onValueChange = { licenseUrl = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("License URL") },
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = attribution,
+                            onValueChange = { attribution = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Required attribution") }
+                        )
+                        OutlinedTextField(
+                            value = sourceReference,
+                            onValueChange = { sourceReference = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Source reference / provenance") }
+                        )
+                        OutlinedTextField(
+                            value = tags,
+                            onValueChange = { tags = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Tags separated by commas") },
+                            singleLine = true
+                        )
+                        Button(
+                            onClick = {
+                                onUpdateAsset(
+                                    selectedAsset.copy(
+                                        licenseId = licenseId.trim().ifBlank { "UNREVIEWED" },
+                                        licenseUrl = licenseUrl.trim(),
+                                        attribution = attribution.trim(),
+                                        sourceReference = sourceReference.trim(),
+                                        tags = tags.split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+                                    )
+                                )
+                            },
+                            enabled = importEnabled,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Save rights & metadata") }
+                        Text(
+                            "This editor records your supplied information; it does not independently verify licenses.",
+                            color = MutedText,
+                            fontSize = 10.sp,
+                            lineHeight = 15.sp
+                        )
                     }
                 }
             }
         }
     }
+}
+
+private fun formatVaultSize(bytes: Long): String = when {
+    bytes < 1024L -> "${bytes} B"
+    bytes < 1024L * 1024L -> "${bytes / 1024L} KB"
+    bytes < 1024L * 1024L * 1024L -> "${bytes / (1024L * 1024L)} MB"
+    else -> "${bytes / (1024L * 1024L * 1024L)} GB"
 }
 
 @Composable
