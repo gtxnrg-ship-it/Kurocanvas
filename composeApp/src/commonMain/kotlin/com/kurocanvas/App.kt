@@ -45,6 +45,9 @@ import com.kurocanvas.project.KuroProfileFieldStatus
 import com.kurocanvas.project.KuroModelCatalog
 import com.kurocanvas.project.KuroModelDownloadProgress
 import com.kurocanvas.project.KuroModelManifest
+import com.kurocanvas.project.KuroNativeActionParser
+import com.kurocanvas.project.KuroNativeActionProposal
+import com.kurocanvas.project.KuroNativeActionType
 import com.kurocanvas.project.KuroPromptBuilder
 import com.kurocanvas.project.KuroStoryContextCompiler
 import com.kurocanvas.project.createKuroLocalModelRuntime
@@ -142,6 +145,7 @@ fun App(storageRoot: String) {
     var kuroLastPrompt by remember { mutableStateOf("") }
     var kuroAssistantStatus by remember { mutableStateOf<String?>(null) }
     var kuroGenerating by remember { mutableStateOf(false) }
+    var pendingKuroAction by remember { mutableStateOf<KuroNativeActionProposal?>(null) }
     val projectStorage = remember(storageRoot) { createKuroProjectStorage(storageRoot) }
     val initialLoad = remember(projectStorage) { projectStorage.load() }
     val vaultStorage = remember(storageRoot) { createKuroVaultStorage(storageRoot) }
@@ -217,6 +221,21 @@ fun App(storageRoot: String) {
         )
         val result = operationBroker.execute(project, operation)
         if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+    }
+    val applyKuroAction: (KuroNativeActionProposal) -> OperationStatus = { proposal ->
+        when (proposal.type) {
+            KuroNativeActionType.ADD_STORYBOARD_PANEL -> {
+                val operation = AddStoryboardPanel(
+                    operationId = "op-kuro-add-panel-${project.revision + 1}",
+                    projectId = project.projectId,
+                    expectedRevision = project.revision,
+                    actor = "kuro-approved-by-user"
+                )
+                val result = operationBroker.execute(project, operation)
+                if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+                result.status
+            }
+        }
     }
     val undoLastStoryboardPanel: () -> Unit = {
         val undonePanelIds = project.auditLog
@@ -462,6 +481,7 @@ fun App(storageRoot: String) {
             modelBusy || kuroGenerating -> kuroAssistantStatus = "Kuro is already handling a task."
             else -> {
                 kuroGenerating = true
+                pendingKuroAction = null
                 kuroLastPrompt = prompt.trim()
                 kuroOutput = ""
                 kuroAssistantStatus = "Using the on-device model; no prompt is sent to a remote service."
@@ -492,10 +512,15 @@ fun App(storageRoot: String) {
                         }
                     )
                     kuroGenerating = false
-                    kuroAssistantStatus = if (result.success) {
-                        "Local response complete. No project changes were applied."
-                    } else {
-                        result.message
+                    val proposedAction = if (result.success) KuroNativeActionParser.parse(result.text) else null
+                    pendingKuroAction = proposedAction
+                    kuroAssistantStatus = when {
+                        !result.success -> result.message
+                        proposedAction != null -> "Kuro prepared a native action proposal. Review and approve it before any project change."
+                        else -> "Local response complete. No project changes were applied."
+                    }
+                    if (proposedAction != null) {
+                        kuroOutput = "Proposed action: ${proposedAction.summary}\nNothing changes until you approve the proposal below."
                     }
                 }
             }
@@ -638,7 +663,14 @@ fun App(storageRoot: String) {
             onCancelDownload = cancelLocalModelDownload,
             onLoadModel = loadLocalModel,
             onUnloadModel = unloadLocalModel,
-            onSendMessage = sendKuroMessage
+            onSendMessage = sendKuroMessage,
+                            pendingAction = pendingKuroAction,
+                            onApplyAction = { proposal ->
+                                val status = applyKuroAction(proposal)
+                                if (status == OperationStatus.COMMITTED) pendingKuroAction = null
+                                status
+                            },
+                            onDismissAction = { pendingKuroAction = null }
                         )
                     } else if (wide && section == Section.Create) {
                         InspectorPanel(strokes.size, project.panels.size, tool, project.revision, project.auditLog.size)
@@ -1759,13 +1791,17 @@ private fun KuroPanel(
     onCancelDownload: () -> Unit,
     onLoadModel: () -> Unit,
     onUnloadModel: () -> Unit,
-    onSendMessage: (String, Int, String, Set<String>) -> Unit
+    onSendMessage: (String, Int, String, Set<String>) -> Unit,
+    pendingAction: KuroNativeActionProposal?,
+    onApplyAction: (KuroNativeActionProposal) -> OperationStatus,
+    onDismissAction: () -> Unit
 ) {
     var draft by remember(project.projectId) { mutableStateOf("") }
     var contextChapterText by remember(project.projectId) { mutableStateOf("1") }
     var contextBranch by remember(project.projectId) { mutableStateOf("main") }
     var entitySearch by remember(project.projectId) { mutableStateOf("") }
     var contextSelectionMessage by remember(project.projectId) { mutableStateOf<String?>(null) }
+    var nativeActionMessage by remember { mutableStateOf<String?>(null) }
     var selectedEntityIds by remember(project.projectId, project.storyEntities.map { it.id }) {
         mutableStateOf(project.storyEntities.take(12).map { it.id }.toSet())
     }
@@ -1969,6 +2005,44 @@ private fun KuroPanel(
                     }
                 }
             }
+            if (pendingAction != null) {
+                Surface(color = Color(0xFF211D32), shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("NATIVE ACTION PROPOSAL", color = Violet, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                        Text(pendingAction.summary, color = PrimaryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Nothing has changed yet. Approving this will add one storyboard panel to the current project and save it.",
+                            color = MutedText,
+                            fontSize = 10.sp,
+                            lineHeight = 15.sp
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    val status = onApplyAction(pendingAction)
+                                    nativeActionMessage = if (status == OperationStatus.COMMITTED) {
+                                        "Approved and saved. The project revision was updated."
+                                    } else {
+                                        "Not applied: ${status.name.lowercase().replace('_', ' ')}."
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink)
+                            ) { Text("Approve & apply") }
+                            OutlinedButton(
+                                onClick = {
+                                    onDismissAction()
+                                    nativeActionMessage = "Proposal dismissed. The project is unchanged."
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Dismiss") }
+                        }
+                    }
+                }
+            }
+            if (nativeActionMessage != null) {
+                Text(nativeActionMessage.orEmpty(), color = MutedText, fontSize = 10.sp, lineHeight = 15.sp)
+            }
             if (isGenerating) {
                 Text("Kuro is thinking on your device…", color = Cyan, fontSize = 10.sp)
             }
@@ -1993,6 +2067,7 @@ private fun KuroPanel(
                         contextBranch.isBlank() -> contextSelectionMessage = "Enter a timeline branch."
                         draft.isBlank() -> contextSelectionMessage = "Write a message first."
                         else -> {
+                            nativeActionMessage = null
                             onSendMessage(draft, chapter, contextBranch.trim(), usableSelectedEntityIds)
                             draft = ""
                             contextSelectionMessage = null
@@ -2004,7 +2079,7 @@ private fun KuroPanel(
             ) { Text(if (isGenerating) "Kuro is thinking…" else "Send to Kuro") }
 
             Text(
-                "Responses are suggestions, not canon. Unknown or conflicting facts are passed through as unknowns; Kuro does not modify your project from chat yet.",
+                "Responses are suggestions, not canon. Any supported native action appears as a proposal and requires your approval; chat alone never changes canon.",
                 color = MutedText,
                 fontSize = 10.sp,
                 lineHeight = 15.sp

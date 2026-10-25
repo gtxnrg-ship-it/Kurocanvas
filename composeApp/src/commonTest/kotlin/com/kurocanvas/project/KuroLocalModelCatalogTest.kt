@@ -30,6 +30,45 @@ class KuroLocalModelCatalogTest {
     }
 
     @Test
+    fun nativeActionParserAcceptsOnlyTheExplicitPanelProposalSchema() {
+        val parsed = KuroNativeActionParser.parse(
+            """{"kuro_action":{"type":"add_storyboard_panel","summary":"Add the next panel"}}"""
+        )
+        assertEquals(KuroNativeActionType.ADD_STORYBOARD_PANEL, parsed?.type)
+        assertEquals("Add the next panel", parsed?.summary)
+
+        val fenced = KuroNativeActionParser.parse(
+            """```json
+{"kuro_action":{"type":"add_storyboard_panel","summary":"Create panel 2"}}
+```"""
+        )
+        assertEquals("Create panel 2", fenced?.summary)
+    }
+
+    @Test
+    fun nativeActionParserRejectsUnsupportedOrAmbiguousPayloads() {
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"delete_project","summary":"Delete it"}}"""
+            )
+        )
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_storyboard_panel","summary":"Add it","projectId":"other"}}"""
+            )
+        )
+        assertEquals(null, KuroNativeActionParser.parse("I added a panel for you."))
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_storyboard_panel","summary":"   "}}"""
+            )
+        )
+    }
+
+    @Test
     fun progressPercentageIsBoundedAndHandlesUnknownTotal() {
         assertEquals(50, KuroModelDownloadProgress(50, 100).percent)
         assertEquals(0, KuroModelDownloadProgress(10, 0).percent)
