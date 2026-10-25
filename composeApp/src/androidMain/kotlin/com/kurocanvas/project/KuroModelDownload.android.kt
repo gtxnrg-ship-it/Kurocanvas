@@ -83,6 +83,7 @@ actual suspend fun downloadKuroModel(
         val initialOffset = offset
         onProgress(KuroModelDownloadProgress(initialOffset, manifest.expectedSizeBytes))
         var downloadedThisSession = 0L
+        var lastReportedBucket = initialOffset / (2L * 1024L * 1024L)
         connection.inputStream.use { input ->
             FileOutputStream(partial, append).use { output ->
                 val buffer = ByteArray(128 * 1024)
@@ -96,7 +97,11 @@ actual suspend fun downloadKuroModel(
                         throw IllegalStateException("The server sent more bytes than declared in the verified model manifest.")
                     }
                     output.write(buffer, 0, count)
-                    onProgress(KuroModelDownloadProgress(downloaded, manifest.expectedSizeBytes))
+                    val currentBucket = downloaded / (2L * 1024L * 1024L)
+                    if (currentBucket != lastReportedBucket || downloaded == manifest.expectedSizeBytes) {
+                        onProgress(KuroModelDownloadProgress(downloaded, manifest.expectedSizeBytes))
+                        lastReportedBucket = currentBucket
+                    }
                 }
                 output.fd.sync()
             }

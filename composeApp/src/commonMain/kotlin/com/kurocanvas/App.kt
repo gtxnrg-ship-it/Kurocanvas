@@ -27,6 +27,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.kurocanvas.project.AddCanonFact
 import com.kurocanvas.project.AddCanvasLayer
 import com.kurocanvas.project.AddCanvasStroke
@@ -34,6 +39,15 @@ import com.kurocanvas.project.AddStoryEntity
 import com.kurocanvas.project.AddStoryEvent
 import com.kurocanvas.project.AddStoryRelationship
 import com.kurocanvas.project.KuroLayer
+import com.kurocanvas.project.KuroContextRequest
+import com.kurocanvas.project.KuroModelCatalog
+import com.kurocanvas.project.KuroModelDownloadProgress
+import com.kurocanvas.project.KuroModelManifest
+import com.kurocanvas.project.KuroPromptBuilder
+import com.kurocanvas.project.KuroStoryContextCompiler
+import com.kurocanvas.project.createKuroLocalModelRuntime
+import com.kurocanvas.project.downloadKuroModel
+import com.kurocanvas.project.findInstalledKuroModelPath
 import com.kurocanvas.project.KuroPlatformAssetImportButton
 import com.kurocanvas.project.KuroVaultAsset
 import com.kurocanvas.project.KuroVaultIndex
@@ -106,6 +120,26 @@ private fun InkStroke.toKuroStroke(id: String): KuroStroke = KuroStroke(
 fun App(storageRoot: String) {
     var section by remember { mutableStateOf(Section.Create) }
     var showKuro by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+    val localModelManifest = KuroModelCatalog.defaultModel
+    val localModelRuntime = remember(storageRoot) { createKuroLocalModelRuntime(storageRoot) }
+    var localModelPath by remember(storageRoot) {
+        mutableStateOf(findInstalledKuroModelPath(storageRoot, localModelManifest))
+    }
+    var localModelLoaded by remember(localModelRuntime) { mutableStateOf(false) }
+    var modelBusy by remember { mutableStateOf(false) }
+    var modelDownloadProgress by remember { mutableStateOf<KuroModelDownloadProgress?>(null) }
+    var modelDownloadJob by remember { mutableStateOf<Job?>(null) }
+    var modelStatusMessage by remember(storageRoot) {
+        mutableStateOf(
+            if (localModelPath != null) "Model installed locally; load it when you are ready."
+            else "No local model downloaded yet. Creative tools work without AI."
+        )
+    }
+    var kuroOutput by remember { mutableStateOf("") }
+    var kuroLastPrompt by remember { mutableStateOf("") }
+    var kuroAssistantStatus by remember { mutableStateOf<String?>(null) }
+    var kuroGenerating by remember { mutableStateOf(false) }
     val projectStorage = remember(storageRoot) { createKuroProjectStorage(storageRoot) }
     val initialLoad = remember(projectStorage) { projectStorage.load() }
     val vaultStorage = remember(storageRoot) { createKuroVaultStorage(storageRoot) }
@@ -354,6 +388,117 @@ fun App(storageRoot: String) {
         if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
         result.status
     }
+    val downloadLocalModel: () -> Unit = {
+        if (!modelBusy && !localModelLoaded && localModelPath == null) {
+            modelBusy = true
+            modelDownloadProgress = KuroModelDownloadProgress(0L, localModelManifest.expectedSizeBytes)
+            modelStatusMessage = "Downloading the local model. You can cancel and resume later."
+            modelDownloadJob = coroutineScope.launch {
+                try {
+                    val result = downloadKuroModel(storageRoot, localModelManifest) { progress ->
+                        coroutineScope.launch { modelDownloadProgress = progress }
+                    }
+                    modelBusy = false
+                    modelDownloadJob = null
+                    modelDownloadProgress = null
+                    if (result.success) {
+                        localModelPath = result.filePath
+                        modelStatusMessage = result.message + " It is stored only in this app's private data directory."
+                    } else {
+                        modelStatusMessage = result.message
+                    }
+                } catch (cancelled: CancellationException) {
+                    modelBusy = false
+                    modelDownloadJob = null
+                    modelDownloadProgress = null
+                    modelStatusMessage = "Download cancelled. The partial file was kept so a later retry can resume."
+                } catch (error: Exception) {
+                    modelBusy = false
+                    modelDownloadJob = null
+                    modelDownloadProgress = null
+                    modelStatusMessage = "Download failed: ${error.message ?: "unknown error"}"
+                }
+            }
+        }
+    }
+    val cancelLocalModelDownload: () -> Unit = {
+        modelDownloadJob?.cancel()
+    }
+    val loadLocalModel: () -> Unit = {
+        val path = localModelPath
+        if (!modelBusy && !kuroGenerating && !localModelLoaded) {
+            if (path == null) {
+                modelStatusMessage = "Download the local model before loading it."
+            } else {
+                modelBusy = true
+                modelStatusMessage = "Loading local model into memory…"
+                coroutineScope.launch {
+                    val result = localModelRuntime.load(path)
+                    localModelLoaded = result.success
+                    modelStatusMessage = result.message
+                    modelBusy = false
+                }
+            }
+        }
+    }
+    val unloadLocalModel: () -> Unit = {
+        if (!modelBusy && !kuroGenerating && localModelLoaded) {
+            modelBusy = true
+            coroutineScope.launch {
+                val result = localModelRuntime.unload()
+                localModelLoaded = false
+                modelStatusMessage = result.message
+                modelBusy = false
+            }
+        }
+    }
+    val sendKuroMessage: (String, Int, String, Set<String>) -> Unit = {
+            prompt, chapter, branchId, entityIds ->
+        when {
+            prompt.isBlank() -> kuroAssistantStatus = "Write a message first."
+            !localModelLoaded -> kuroAssistantStatus = "Load the local model before chatting."
+            modelBusy || kuroGenerating -> kuroAssistantStatus = "Kuro is already handling a task."
+            else -> {
+                kuroGenerating = true
+                kuroLastPrompt = prompt.trim()
+                kuroOutput = ""
+                kuroAssistantStatus = "Using the on-device model; no prompt is sent to a remote service."
+                val projectSnapshot = project
+                coroutineScope.launch {
+                    val contextText = withContext(Dispatchers.Default) {
+                        if (entityIds.isEmpty()) {
+                            "No story entities were selected. Answer general creative questions without inventing any project canon."
+                        } else {
+                            KuroStoryContextCompiler.compile(
+                                projectSnapshot,
+                                KuroContextRequest(
+                                    chapter = chapter,
+                                    branchId = branchId,
+                                    entityIds = entityIds,
+                                    lookbackChapters = 3
+                                )
+                            ).renderForModel()
+                        }
+                    }
+                    val result = localModelRuntime.generate(
+                        systemInstruction = KuroPromptBuilder.systemInstruction(contextText),
+                        userPrompt = prompt.trim(),
+                        onPartialText = { chunk ->
+                            coroutineScope.launch {
+                                kuroOutput = (kuroOutput + chunk).takeLast(18000)
+                            }
+                        }
+                    )
+                    kuroGenerating = false
+                    kuroAssistantStatus = if (result.success) {
+                        "Local response complete. No project changes were applied."
+                    } else {
+                        result.message
+                    }
+                }
+            }
+        }
+    }
     var tool by remember { mutableStateOf("Brush") }
     var brushSize by remember { mutableFloatStateOf(4.5f) }
     var strokes by remember(projectStorage) { mutableStateOf(project.strokes.map { it.toInkStroke() }) }
@@ -475,7 +620,23 @@ fun App(storageRoot: String) {
                         KuroPanel(
                             Modifier.width(320.dp).fillMaxHeight(),
                             onClose = { showKuro = false },
-                            onAddPanel = addStoryboardPanel
+                            onAddPanel = addStoryboardPanel,
+            project = project,
+            modelManifest = localModelManifest,
+            modelPath = localModelPath,
+            modelLoaded = localModelLoaded,
+            modelBusy = modelBusy,
+            modelMessage = modelStatusMessage,
+            modelProgress = modelDownloadProgress,
+            lastPrompt = kuroLastPrompt,
+            reply = kuroOutput,
+            replyError = kuroAssistantStatus,
+            isGenerating = kuroGenerating,
+            onDownloadModel = downloadLocalModel,
+            onCancelDownload = cancelLocalModelDownload,
+            onLoadModel = loadLocalModel,
+            onUnloadModel = unloadLocalModel,
+            onSendMessage = sendKuroMessage
                         )
                     } else if (wide && section == Section.Create) {
                         InspectorPanel(strokes.size, project.panels.size, tool, project.revision, project.auditLog.size)
@@ -489,7 +650,23 @@ fun App(storageRoot: String) {
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                         .padding(start = 10.dp, end = 10.dp, bottom = 72.dp),
                     onClose = { showKuro = false },
-                    onAddPanel = addStoryboardPanel
+                    onAddPanel = addStoryboardPanel,
+                    project = project,
+                    modelManifest = localModelManifest,
+                    modelPath = localModelPath,
+                    modelLoaded = localModelLoaded,
+                    modelBusy = modelBusy,
+                    modelMessage = modelStatusMessage,
+                    modelProgress = modelDownloadProgress,
+                    lastPrompt = kuroLastPrompt,
+                    reply = kuroOutput,
+                    replyError = kuroAssistantStatus,
+                    isGenerating = kuroGenerating,
+                    onDownloadModel = downloadLocalModel,
+                    onCancelDownload = cancelLocalModelDownload,
+                    onLoadModel = loadLocalModel,
+                    onUnloadModel = unloadLocalModel,
+                    onSendMessage = sendKuroMessage
                 )
             }
         }
@@ -1480,15 +1657,58 @@ private fun PlannedWorkspace(title: String, description: String, icon: String) {
 }
 
 @Composable
-private fun KuroPanel(modifier: Modifier = Modifier, onClose: () -> Unit, onAddPanel: () -> Unit) {
+private fun KuroPanel(
+    modifier: Modifier = Modifier,
+    project: KuroProjectState,
+    modelManifest: KuroModelManifest,
+    modelPath: String?,
+    modelLoaded: Boolean,
+    modelBusy: Boolean,
+    modelMessage: String,
+    modelProgress: KuroModelDownloadProgress?,
+    lastPrompt: String,
+    reply: String,
+    replyError: String?,
+    isGenerating: Boolean,
+    onClose: () -> Unit,
+    onAddPanel: () -> Unit,
+    onDownloadModel: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onLoadModel: () -> Unit,
+    onUnloadModel: () -> Unit,
+    onSendMessage: (String, Int, String, Set<String>) -> Unit
+) {
+    var draft by remember(project.projectId) { mutableStateOf("") }
+    var contextChapterText by remember(project.projectId) { mutableStateOf("1") }
+    var contextBranch by remember(project.projectId) { mutableStateOf("main") }
+    var entitySearch by remember(project.projectId) { mutableStateOf("") }
+    var contextSelectionMessage by remember(project.projectId) { mutableStateOf<String?>(null) }
+    var selectedEntityIds by remember(project.projectId, project.storyEntities.map { it.id }) {
+        mutableStateOf(project.storyEntities.take(12).map { it.id }.toSet())
+    }
+    val visibleEntities = project.storyEntities
+        .filter { entity -> entitySearch.isBlank() || entity.name.contains(entitySearch, ignoreCase = true) }
+        .take(24)
+    val usableSelectedEntityIds = selectedEntityIds.intersect(project.storyEntities.map { it.id }.toSet())
+    val progressPercent = modelProgress?.percent ?: 0
+
     Surface(
-        modifier = modifier.clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).border(1.dp, Color(0xFF514578), RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
+        modifier = modifier
+            .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+            .border(1.dp, Color(0xFF514578), RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
         color = Raised,
         shadowElevation = 16.dp
     ) {
-        Column(Modifier.fillMaxWidth().padding(15.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(15.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(11.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(38.dp).clip(CircleShape).background(Brush.radialGradient(listOf(Cyan, Violet, Color(0xFF25213D))),), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(38.dp).clip(CircleShape)
+                        .background(Brush.radialGradient(listOf(Cyan, Violet, Color(0xFF25213D)))),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text("K", color = Ink, fontWeight = FontWeight.Black, fontSize = 17.sp)
                 }
                 Spacer(Modifier.width(10.dp))
@@ -1496,39 +1716,232 @@ private fun KuroPanel(modifier: Modifier = Modifier, onClose: () -> Unit, onAddP
                     Text("Kuro", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                     Text("Creative companion", color = MutedText, fontSize = 10.sp)
                 }
-                StatusPill("OFFLINE", Amber)
+                StatusPill(
+                    when {
+                        modelLoaded -> "ON-DEVICE"
+                        modelPath != null -> "LOCAL READY"
+                        else -> "NO MODEL"
+                    },
+                    if (modelLoaded) Green else Amber
+                )
                 TextButton(onClick = onClose) { Text("Close", color = MutedText, fontSize = 11.sp) }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                StatusPill("Canvas ready", Green)
-                StatusPill("Model not connected", Amber)
-            }
+
             Surface(color = Color(0xFF10131D), shape = RoundedCornerShape(13.dp), modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Kuro runtime status", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Text("The local language model and voice runtime are not connected yet. Project data and drawing operations stay on this device; no prompt is sent anywhere from this prototype.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("LOCAL MODEL", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                    Text(modelManifest.displayName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "An on-device language model for Kuro chat and story context. It does not draw images; native Kuro Canvas tools remain responsible for editable work.",
+                        color = MutedText,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                    Text(
+                        "≈614 MB download · ${modelManifest.contextLength}-token context · ${modelManifest.licenseId}",
+                        color = Cyan,
+                        fontSize = 10.sp
+                    )
+                    Text("Source: ${modelManifest.repositoryUrl}", color = MutedText, fontSize = 9.sp)
+                    Text("Model files are verified by SHA-256 before installation and stay in app-private storage.", color = MutedText, fontSize = 10.sp, lineHeight = 15.sp)
+
+                    if (modelBusy && modelProgress != null) {
+                        Box(
+                            Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(Line)
+                        ) {
+                            Box(
+                                Modifier.fillMaxWidth((progressPercent / 100f).coerceIn(0f, 1f))
+                                    .fillMaxHeight().background(Cyan)
+                            )
+                        }
+                        Text(
+                            "$progressPercent% · ${formatVaultSize(modelProgress.receivedBytes)} of ${formatVaultSize(modelProgress.totalBytes)}",
+                            color = MutedText,
+                            fontSize = 10.sp
+                        )
+                    } else if (modelBusy) {
+                        Text("Preparing the local runtime…", color = MutedText, fontSize = 10.sp)
+                    }
+
+                    when {
+                        modelBusy && modelProgress != null -> {
+                            OutlinedButton(
+                                onClick = onCancelDownload,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Cancel download") }
+                        }
+                        modelBusy -> {
+                            Button(
+                                onClick = {},
+                                enabled = false,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Working…") }
+                        }
+                        modelLoaded -> {
+                            Button(
+                                onClick = onUnloadModel,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Raised, contentColor = PrimaryText)
+                            ) { Text("Unload model · release memory") }
+                        }
+                        modelPath != null -> {
+                            Button(
+                                onClick = onLoadModel,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink)
+                            ) { Text("Load local model") }
+                        }
+                        else -> {
+                            Button(
+                                onClick = onDownloadModel,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink)
+                            ) { Text("Download free local model") }
+                        }
+                    }
+                    Text(modelMessage, color = if (modelMessage.contains("failed", ignoreCase = true) || modelMessage.contains("could not", ignoreCase = true)) Amber else MutedText, fontSize = 10.sp, lineHeight = 15.sp)
                 }
             }
-            Text("Native-operation preview", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text("This commits a typed storyboard-panel object through the revision-checked operation broker, increments the project revision and audit history, then autosaves the project locally. The language model is still not connected.", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
-            Button(onClick = onAddPanel, colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink), modifier = Modifier.fillMaxWidth()) {
-                Text("Add storyboard panel • demo tool", fontSize = 12.sp)
+
+            Text("Story context", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Select only the characters relevant to this turn. Kuro retrieves their chapter- and branch-scoped canon, active relationships, and recent events instead of sending the entire story history.",
+                color = MutedText,
+                fontSize = 10.sp,
+                lineHeight = 15.sp
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = contextChapterText,
+                    onValueChange = { contextChapterText = it; contextSelectionMessage = null },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Chapter") },
+                    singleLine = true,
+                    enabled = modelLoaded && !isGenerating
+                )
+                OutlinedTextField(
+                    value = contextBranch,
+                    onValueChange = { contextBranch = it; contextSelectionMessage = null },
+                    modifier = Modifier.weight(1.4f),
+                    label = { Text("Timeline branch") },
+                    singleLine = true,
+                    enabled = modelLoaded && !isGenerating
+                )
             }
-            DividerLine()
             OutlinedTextField(
-                value = "",
-                onValueChange = {},
+                value = entitySearch,
+                onValueChange = { entitySearch = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Tell Kuro what you want to build…", fontSize = 12.sp) },
-                enabled = false,
+                label = { Text("Find a story character") },
+                singleLine = true,
+                enabled = project.storyEntities.isNotEmpty() && modelLoaded && !isGenerating
+            )
+            if (visibleEntities.isEmpty()) {
+                Text("No story characters match yet. The model can still help with general creative questions.", color = MutedText, fontSize = 10.sp)
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    visibleEntities.forEach { entity ->
+                        val selected = entity.id in selectedEntityIds
+                        ToolChip(entity.name, selected) {
+                            if (selected) {
+                                selectedEntityIds = selectedEntityIds - entity.id
+                                contextSelectionMessage = null
+                            } else if (selectedEntityIds.size >= 24) {
+                                contextSelectionMessage = "Choose up to 24 relevant entities for a bounded context."
+                            } else {
+                                selectedEntityIds = selectedEntityIds + entity.id
+                                contextSelectionMessage = null
+                            }
+                        }
+                    }
+                }
+            }
+            Text(
+                "${usableSelectedEntityIds.size} character(s) selected · ${project.relationships.size} relationship record(s) · ${project.storyEvents.size} story event(s)",
+                color = MutedText,
+                fontSize = 10.sp
+            )
+            if (contextSelectionMessage != null) {
+                Text(contextSelectionMessage.orEmpty(), color = Amber, fontSize = 10.sp)
+            }
+
+            DividerLine()
+            Text("Chat with Kuro", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            if (lastPrompt.isNotBlank()) {
+                Surface(color = Color(0xFF25213D), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("YOU", color = Cyan, fontSize = 9.sp, letterSpacing = 1.sp)
+                        Text(lastPrompt, color = PrimaryText, fontSize = 12.sp, lineHeight = 17.sp)
+                    }
+                }
+            }
+            if (reply.isNotBlank()) {
+                Surface(color = Color(0xFF10131D), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("KURO · LOCAL", color = Violet, fontSize = 9.sp, letterSpacing = 1.sp)
+                        Text(reply, color = PrimaryText, fontSize = 12.sp, lineHeight = 18.sp)
+                    }
+                }
+            }
+            if (isGenerating) {
+                Text("Kuro is thinking on your device…", color = Cyan, fontSize = 10.sp)
+            }
+            if (!replyError.isNullOrBlank()) {
+                Text(replyError, color = if (replyError.contains("failed", ignoreCase = true) || replyError.contains("could not", ignoreCase = true)) Amber else MutedText, fontSize = 10.sp, lineHeight = 15.sp)
+            }
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Ask Kuro about your story or creative plan…", fontSize = 12.sp) },
+                enabled = modelLoaded && !isGenerating && !modelBusy,
+                minLines = 2,
+                maxLines = 5,
                 shape = RoundedCornerShape(14.dp)
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Voice session not connected", color = MutedText, fontSize = 10.sp, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = {}, enabled = false, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) { Text("◉ Voice", fontSize = 11.sp) }
-                Spacer(Modifier.width(7.dp))
-                Button(onClick = {}, enabled = false, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) { Text("Send", fontSize = 11.sp) }
+            Button(
+                onClick = {
+                    val chapter = contextChapterText.toIntOrNull()
+                    when {
+                        chapter == null || chapter < 1 -> contextSelectionMessage = "Enter a chapter number greater than zero."
+                        contextBranch.isBlank() -> contextSelectionMessage = "Enter a timeline branch."
+                        draft.isBlank() -> contextSelectionMessage = "Write a message first."
+                        else -> {
+                            onSendMessage(draft, chapter, contextBranch.trim(), usableSelectedEntityIds)
+                            draft = ""
+                            contextSelectionMessage = null
+                        }
+                    }
+                },
+                enabled = modelLoaded && !isGenerating && !modelBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (isGenerating) "Kuro is thinking…" else "Send to Kuro") }
+
+            Text(
+                "Responses are suggestions, not canon. Unknown or conflicting facts are passed through as unknowns; Kuro does not modify your project from chat yet.",
+                color = MutedText,
+                fontSize = 10.sp,
+                lineHeight = 15.sp
+            )
+            DividerLine()
+            Text("Native project action", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "This direct action is validated, revision-checked and autosaved. The current model integration is chat-only; native operation proposals will be added as a separately approved tool path.",
+                color = MutedText,
+                fontSize = 10.sp,
+                lineHeight = 15.sp
+            )
+            Button(
+                onClick = onAddPanel,
+                colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Ink),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Add storyboard panel")
             }
+            Text("Voice session is not connected yet.", color = MutedText, fontSize = 10.sp)
         }
     }
 }
