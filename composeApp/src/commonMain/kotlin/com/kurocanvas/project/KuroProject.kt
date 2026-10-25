@@ -1,11 +1,15 @@
 package com.kurocanvas.project
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class StoryboardPanel(
     val id: String,
     val order: Int,
     val createdRevision: Long
 )
 
+@Serializable
 data class KuroAuditEvent(
     val operationId: String,
     val revision: Long,
@@ -15,6 +19,7 @@ data class KuroAuditEvent(
     val summary: String
 )
 
+@Serializable
 data class KuroProjectState(
     val projectId: String,
     val title: String,
