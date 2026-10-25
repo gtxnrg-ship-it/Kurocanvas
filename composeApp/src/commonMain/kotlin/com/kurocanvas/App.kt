@@ -95,6 +95,12 @@ private enum class Section(val label: String, val glyph: String) {
 
 private data class InkStroke(val points: List<Offset>, val color: Color, val widthRatio: Float, val layerId: String)
 
+private data class KuroNativeActionUiResult(
+    val status: OperationStatus,
+    val saved: Boolean? = null,
+    val message: String = ""
+)
+
 private fun Int.toStudioColor(): Color = Color(
     red = ((this ushr 16) and 0xFF) / 255f,
     green = ((this ushr 8) and 0xFF) / 255f,
@@ -238,10 +244,26 @@ fun App(storageRoot: String) {
         val result = operationBroker.execute(project, operation)
         if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
     }
-    val applyKuroAction: (KuroNativeActionProposal) -> OperationStatus = { proposal ->
-        val result = KuroNativeActionDispatcher.apply(project, proposal, operationBroker)
-        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
-        result.status
+    val applyKuroAction: (KuroNativeActionProposal) -> KuroNativeActionUiResult = { proposal ->
+        if (!projectWritesAllowed) {
+            KuroNativeActionUiResult(
+                status = OperationStatus.STORAGE_UNAVAILABLE,
+                saved = false,
+                message = storageWarning ?: "Project storage is unavailable."
+            )
+        } else {
+            val result = KuroNativeActionDispatcher.apply(project, proposal, operationBroker)
+            if (result.status == OperationStatus.COMMITTED) {
+                commitProject(result.project)
+                KuroNativeActionUiResult(
+                    status = result.status,
+                    saved = storageWarning == null,
+                    message = storageWarning ?: result.message
+                )
+            } else {
+                KuroNativeActionUiResult(status = result.status, message = result.message)
+            }
+        }
     }
     val undoLastStoryboardPanel: () -> Unit = {
         val undonePanelIds = project.auditLog
@@ -674,9 +696,9 @@ fun App(storageRoot: String) {
             onSendMessage = sendKuroMessage,
                             pendingAction = pendingKuroAction,
                             onApplyAction = { proposal ->
-                                val status = applyKuroAction(proposal)
-                                if (status == OperationStatus.COMMITTED) pendingKuroAction = null
-                                status
+                                val result = applyKuroAction(proposal)
+                                if (result.status == OperationStatus.COMMITTED) pendingKuroAction = null
+                                result
                             },
                             onDismissAction = { pendingKuroAction = null }
                         )
@@ -711,9 +733,9 @@ fun App(storageRoot: String) {
                     onSendMessage = sendKuroMessage,
                     pendingAction = pendingKuroAction,
                     onApplyAction = { proposal ->
-                        val status = applyKuroAction(proposal)
-                        if (status == OperationStatus.COMMITTED) pendingKuroAction = null
-                        status
+                        val result = applyKuroAction(proposal)
+                        if (result.status == OperationStatus.COMMITTED) pendingKuroAction = null
+                        result
                     },
                     onDismissAction = { pendingKuroAction = null }
                 )
@@ -1859,7 +1881,7 @@ private fun KuroPanel(
     onUnloadModel: () -> Unit,
     onSendMessage: (String, Int, String, Set<String>) -> Unit,
     pendingAction: KuroNativeActionProposal?,
-    onApplyAction: (KuroNativeActionProposal) -> OperationStatus,
+    onApplyAction: (KuroNativeActionProposal) -> KuroNativeActionUiResult,
     onDismissAction: () -> Unit
 ) {
     var draft by remember(project.projectId) { mutableStateOf("") }
@@ -2092,11 +2114,18 @@ private fun KuroPanel(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = {
-                                    val status = onApplyAction(pendingAction)
-                                    nativeActionMessage = if (status == OperationStatus.COMMITTED) {
-                                        "Approved and saved. The project revision was updated."
-                                    } else {
-                                        "Not applied: ${status.name.lowercase().replace('_', ' ')}."
+                                    val result = onApplyAction(pendingAction)
+                                    nativeActionMessage = when {
+                                        result.status == OperationStatus.COMMITTED && result.saved == true ->
+                                            "Approved and saved. The project revision was updated."
+                                        result.status == OperationStatus.COMMITTED ->
+                                            "Applied in memory, but the save failed: ${result.message}"
+                                        result.status == OperationStatus.STORAGE_UNAVAILABLE ->
+                                            "Not applied because project storage is unavailable: ${result.message}"
+                                        result.status == OperationStatus.CANON_CONTRADICTION ->
+                                            "Not applied: this would contradict confirmed canon. ${result.message}"
+                                        else ->
+                                            "Not applied: ${result.message.ifBlank { result.status.name.lowercase().replace('_', ' ') }}."
                                     }
                                 },
                                 modifier = Modifier.weight(1f),
