@@ -700,7 +700,14 @@ fun App(storageRoot: String) {
                     onCancelDownload = cancelLocalModelDownload,
                     onLoadModel = loadLocalModel,
                     onUnloadModel = unloadLocalModel,
-                    onSendMessage = sendKuroMessage
+                    onSendMessage = sendKuroMessage,
+                    pendingAction = pendingKuroAction,
+                    onApplyAction = { proposal ->
+                        val status = applyKuroAction(proposal)
+                        if (status == OperationStatus.COMMITTED) pendingKuroAction = null
+                        status
+                    },
+                    onDismissAction = { pendingKuroAction = null }
                 )
             }
         }
@@ -1924,7 +1931,7 @@ private fun KuroPanel(
 
             Text("Story context", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Select only the characters relevant to this turn. Kuro retrieves their chapter- and branch-scoped canon, active relationships, and recent events instead of sending the entire story history.",
+                "Select only the story entities relevant to this turn. Kuro retrieves their chapter- and branch-scoped canon, active relationships, and recent events instead of sending the entire story history.",
                 color = MutedText,
                 fontSize = 10.sp,
                 lineHeight = 15.sp
@@ -1951,12 +1958,12 @@ private fun KuroPanel(
                 value = entitySearch,
                 onValueChange = { entitySearch = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Find a story character") },
+                label = { Text("Find a story entity") },
                 singleLine = true,
                 enabled = project.storyEntities.isNotEmpty() && modelLoaded && !isGenerating
             )
             if (visibleEntities.isEmpty()) {
-                Text("No story characters match yet. The model can still help with general creative questions.", color = MutedText, fontSize = 10.sp)
+                Text("No story entities match yet. The model can still help with general creative questions.", color = MutedText, fontSize = 10.sp)
             } else {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -2087,7 +2094,7 @@ private fun KuroPanel(
             DividerLine()
             Text("Native project action", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "This direct action is validated, revision-checked and autosaved. The current model integration is chat-only; native operation proposals will be added as a separately approved tool path.",
+                "Kuro can propose adding a storyboard panel. The proposal is revision-checked and only applied after you approve it.",
                 color = MutedText,
                 fontSize = 10.sp,
                 lineHeight = 15.sp
