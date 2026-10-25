@@ -1,24 +1,37 @@
 # Kuro Canvas
 
-**A persistent creative-world workspace for manga, manhua, manhwa/webtoons, comics, illustration, animation, and integrated 2D/3D production.**
+**An Android-first and desktop creative workspace for manga, manhua, manhwa/webtoons, comics, illustration, animation, and integrated 2D/3D production.**
 
-Kuro Canvas is not just a canvas, an image generator, or a chatbot. The canvas is one view of a project whose story, world, characters, timeline, assets, scenes, panels, styles, and production state remain structured and editable.
+Kuro Canvas is not an image generator or a chatbot wrapped around a canvas. The project stores structured, editable data; Kuro is intended to operate native creative tools rather than flattening work into generated images.
 
-## Core principles
+## Current working foundation
 
-- **Native creation, not flattened generation.** Kuro operates real editable engines and project objects.
-- **AI is optional; creative tools are not.** Drawing, editing, saving, import/export and project management must work without a model.
+- **Build:** Android debug APK and desktop target are verified by GitHub Actions CI.
+- **Local projects:** JSON project loading/autosave with atomic-replacement writes on Android and desktop.
+- **Editable canvas:** normalized brush-stroke geometry with color, width and layer references; typed operations with revision checks, audit events and undo.
+- **Layers:** layer creation/settings, visibility, locking, opacity, selection and dependency-safe removal are wired into the drawing workspace.
+- **Story canon:** character records and confirmed facts are stored as project data, scoped by chapter interval and timeline branch. Contradictory confirmed values are rejected rather than silently overwritten.
+- **Vault:** local file import, content hash, deduplication, metadata index and an editable license/attribution/provenance record. Imports default to UNREVIEWED; metadata entry does not independently verify rights.
+- **Local-first:** project data and asset imports are stored locally. No model endpoint is required, and this prototype does not send prompts to a remote service.
+
+## Product principles
+
+- **Native creation, not flattened generation.** Drawings, characters, scenes and assets must remain editable.
+- **AI is optional; creative tools are not.** Drawing, editing, saving, import/export and project management work without a model.
 - **The project is the source of truth.** Conversation history alone is never canon.
-- **Continuity is temporal.** Character, relationship, organization, location, prop and event states resolve by story time and branch.
-- **Inspectability and control.** Kuro proposes typed operations; the runtime validates permissions and dependencies, previews changes when needed, and supports undo/rollback.
-- **Local-first and user-owned.** Projects work offline, recover after interruption, and don't require users to bring their own model API keys.
-- **Reuse before rebuild.** Mature libraries and interchange formats are preferred when platform support, quality, and licensing fit.
+- **Continuity is temporal.** Character facts can differ by chapter and timeline branch.
+- **Inspectability and control.** Typed operations validate project identity/revision, record audit history and support undo where implemented.
+- **Reuse before rebuild.** Mature libraries and interchange formats are preferred when platform support, quality and licensing fit.
 
-## Kuro
+## Roadmap still not implemented
 
-Kuro is the persistent creative companion and production operator. A model can help interpret intent and propose structured tool calls, but native Kuro Canvas engines do the creation: document/layers/brushes, character/body/hair/clothing/pose, scene/panel/camera/lighting, 2D/3D, timeline, color, lettering, assets and publishing.
+This is an early working foundation, not the full creative studio. The full asset-management/publishing ecosystem, professional layer/brush engine, character/anatomy/hair/clothing engines, relationships and organization graphs, advanced timeline simulation, real 3D viewport/rigging, motion capture, episode publishing pipeline, local inference runtime, and voice are not yet complete. UI status must never pretend an engine is integrated before it actually is.
 
-## Start here
+## Kuro and native engines
+
+Kuro is the optional creative companion and production operator. A model can interpret intent and propose typed tool calls, but native Kuro Canvas engines do the creation: document/layers/brushes, character/body/hair/clothing/pose, scene/panel/camera/lighting, 2D/3D, timeline, color, lettering, assets and publishing. The dedicated local-model strategy is documented separately.
+
+## Research and design
 
 - [Open-source component catalogue](docs/research/open-source-component-catalog.md)
 - [Motion capture and dance retargeting](docs/research/motion-capture-and-retargeting.md)
@@ -27,10 +40,6 @@ Kuro is the persistent creative companion and production operator. A model can h
 - [Mobile workspace blueprint](docs/design/mobile-workspace-blueprint.md)
 - [Foundation milestones](docs/implementation/foundation-milestones.md)
 
-## Current status
-
-The repository now has a typed native project-operation broker, revision/audit/undo support for storyboard panels, a cross-platform JSON project codec, and app-private autosave/load wiring for Android and desktop. Storage writes use a temporary file and atomic replacement where the filesystem supports it. The current project model persists storyboard panels and its audit log; canvas strokes, full asset Vault, story/character/timeline engines, 3D, motion capture, and local-model inference remain unfinished. UI status must never pretend an engine is integrated before it actually is.
-
 ## Dependency and asset licensing
 
-A public repository does not automatically grant redistribution rights. Review each code dependency, model weight, tokenizer, voice, font, brush, texture, sample project and dataset independently. Record exact versions, sources, license notices, modifications and provenance. Do not adopt components whose platform support or licensing is incompatible with Kuro Canvas.
+A public repository does not automatically grant redistribution rights. Review each code dependency, model weight, tokenizer, voice, font, brush, texture, sample project and dataset independently. Record exact versions, sources, license notices, modifications and provenance.

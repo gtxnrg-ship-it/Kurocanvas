@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -27,8 +28,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kurocanvas.project.AddCanonFact
+import com.kurocanvas.project.AddCanvasLayer
 import com.kurocanvas.project.AddCanvasStroke
 import com.kurocanvas.project.AddStoryEntity
+import com.kurocanvas.project.KuroLayer
 import com.kurocanvas.project.KuroPlatformAssetImportButton
 import com.kurocanvas.project.KuroVaultAsset
 import com.kurocanvas.project.KuroVaultIndex
@@ -43,7 +46,9 @@ import com.kurocanvas.project.KuroStoryEntity
 import com.kurocanvas.project.KuroStoryEntityType
 import com.kurocanvas.project.createKuroProjectStorage
 import com.kurocanvas.project.OperationStatus
+import com.kurocanvas.project.UndoAddedCanvasLayer
 import com.kurocanvas.project.UndoAddedCanvasStroke
+import com.kurocanvas.project.UpdateCanvasLayer
 import com.kurocanvas.project.UndoAddedStoryboardPanel
 
 private val Ink = Color(0xFF0A0C13)
@@ -62,7 +67,7 @@ private enum class Section(val label: String, val glyph: String) {
     Style("Style Lab", "◉"), ThreeD("3D", "◇"), Research("Research", "⌕"), Publish("Publish", "↗")
 }
 
-private data class InkStroke(val points: List<Offset>, val color: Color, val widthRatio: Float)
+private data class InkStroke(val points: List<Offset>, val color: Color, val widthRatio: Float, val layerId: String)
 
 private fun Int.toStudioColor(): Color = Color(
     red = ((this ushr 16) and 0xFF) / 255f,
@@ -80,14 +85,16 @@ private fun Color.toArgbInt(): Int =
 private fun KuroStroke.toInkStroke(): InkStroke = InkStroke(
     points = points.map { Offset(it.x, it.y) },
     color = colorArgb.toStudioColor(),
-    widthRatio = widthRatio
+    widthRatio = widthRatio,
+    layerId = layerId
 )
 
 private fun InkStroke.toKuroStroke(id: String): KuroStroke = KuroStroke(
     id = id,
     points = points.map { KuroStrokePoint(it.x, it.y) },
     colorArgb = color.toArgbInt(),
-    widthRatio = widthRatio
+    widthRatio = widthRatio,
+    layerId = layerId
 )
 
 @Composable
@@ -143,7 +150,12 @@ fun App(storageRoot: String) {
         }
     }
     var project by remember(projectStorage) {
-        mutableStateOf(initialLoad.state ?: KuroProjectState.empty())
+        mutableStateOf((initialLoad.state ?: KuroProjectState.empty()).let {
+            if (it.layers.isEmpty()) it.copy(layers = listOf(KuroLayer.default())) else it
+        })
+    }
+    var selectedLayerId by remember(projectStorage) {
+        mutableStateOf(project.layers.first().id)
     }
     var storageWarning by remember(projectStorage) { mutableStateOf(initialLoad.warning) }
     val projectWritesAllowed = initialLoad.warning == null
@@ -185,6 +197,70 @@ fun App(storageRoot: String) {
                 )
             )
             if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        }
+    }
+    val addCanvasLayer: () -> Unit = {
+        val revision = project.revision
+        val id = "layer-${revision + 1}"
+        val result = operationBroker.execute(
+            project,
+            AddCanvasLayer(
+                operationId = "op-add-layer-${revision + 1}",
+                projectId = project.projectId,
+                expectedRevision = revision,
+                layer = KuroLayer(
+                    id = id,
+                    name = "Layer ${project.layers.size + 1}",
+                    order = project.layers.size
+                )
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) {
+            commitProject(result.project)
+            selectedLayerId = id
+        }
+    }
+    val updateCanvasLayer: (String, String?, Boolean?, Boolean?, Float?) -> OperationStatus = {
+            id, name, visible, locked, opacity ->
+        val revision = project.revision
+        val result = operationBroker.execute(
+            project,
+            UpdateCanvasLayer(
+                operationId = "op-update-layer-${revision + 1}",
+                projectId = project.projectId,
+                expectedRevision = revision,
+                layerId = id,
+                name = name,
+                visible = visible,
+                locked = locked,
+                opacity = opacity
+            )
+        )
+        if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+        result.status
+    }
+    val removeCanvasLayer: (String) -> OperationStatus = { id ->
+        val addEvent = project.auditLog.lastOrNull {
+            it.action == "add_canvas_layer" && it.targetId == id
+        }
+        if (addEvent == null) {
+            OperationStatus.INVALID_UNDO_TARGET
+        } else {
+            val revision = project.revision
+            val result = operationBroker.execute(
+                project,
+                UndoAddedCanvasLayer(
+                    operationId = "op-remove-layer-${revision + 1}",
+                    projectId = project.projectId,
+                    expectedRevision = revision,
+                    targetOperationId = addEvent.operationId
+                )
+            )
+            if (result.status == OperationStatus.COMMITTED) {
+                commitProject(result.project)
+                if (selectedLayerId == id) selectedLayerId = project.layers.first().id
+            }
+            result.status
         }
     }
     val addStoryCharacter: (String) -> OperationStatus = { name ->
@@ -307,13 +383,20 @@ fun App(storageRoot: String) {
                             Section.Create -> CreateWorkspace(
                                 wide = wide,
                                 strokes = strokes,
+                                layers = project.layers,
+                                selectedLayerId = selectedLayerId,
+                                onSelectLayer = { selectedLayerId = it },
+                                onAddLayer = addCanvasLayer,
+                                onUpdateLayer = updateCanvasLayer,
+                                onRemoveLayer = removeCanvasLayer,
                                 demoPanels = project.panels.size,
                                 tool = tool,
                                 onTool = { tool = it },
                                 brushSize = brushSize,
                                 onBrushSize = { brushSize = it },
                                 onStroke = { newInkStroke ->
-                                    val nativeStroke = newInkStroke.toKuroStroke("stroke-${project.revision + 1}")
+                                    val nativeStroke = newInkStroke.copy(layerId = selectedLayerId)
+                                        .toKuroStroke("stroke-${project.revision + 1}")
                                     val result = operationBroker.execute(
                                         project,
                                         AddCanvasStroke(
@@ -444,6 +527,12 @@ private fun NavigationItem(item: Section, selected: Boolean, onClick: () -> Unit
 private fun CreateWorkspace(
     wide: Boolean,
     strokes: List<InkStroke>,
+    layers: List<KuroLayer>,
+    selectedLayerId: String,
+    onSelectLayer: (String) -> Unit,
+    onAddLayer: () -> Unit,
+    onUpdateLayer: (String, String?, Boolean?, Boolean?, Float?) -> OperationStatus,
+    onRemoveLayer: (String) -> OperationStatus,
     demoPanels: Int,
     tool: String,
     onTool: (String) -> Unit,
@@ -465,12 +554,83 @@ private fun CreateWorkspace(
             Spacer(Modifier.weight(1f))
             Text("STROKES " + strokes.size, color = MutedText, fontSize = 10.sp)
         }
+        val activeLayer = layers.firstOrNull { it.id == selectedLayerId }
+        var layerMessage by remember(selectedLayerId) { mutableStateOf<String?>(null) }
+        var layerOpacity by remember(selectedLayerId, activeLayer?.opacity) {
+            mutableFloatStateOf(activeLayer?.opacity ?: 1f)
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("LAYERS", color = MutedText, fontSize = 9.sp, letterSpacing = 0.8.sp)
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                layers.sortedBy { it.order }.forEach { layer ->
+                    ToolChip(
+                        layer.name + if (layer.locked) " 🔒" else "",
+                        layer.id == selectedLayerId
+                    ) { onSelectLayer(layer.id); layerMessage = null }
+                }
+            }
+            ToolChip("+", false) { onAddLayer(); layerMessage = null }
+        }
+        if (activeLayer != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ToolChip(if (activeLayer.visible) "Visible" else "Hidden", activeLayer.visible) {
+                    val status = onUpdateLayer(activeLayer.id, null, !activeLayer.visible, null, null)
+                    layerMessage = if (status == OperationStatus.COMMITTED) null else status.name
+                }
+                ToolChip(if (activeLayer.locked) "Locked" else "Unlocked", activeLayer.locked) {
+                    val status = onUpdateLayer(activeLayer.id, null, null, !activeLayer.locked, null)
+                    layerMessage = if (status == OperationStatus.COMMITTED) null else status.name
+                }
+                Text("Opacity", color = MutedText, fontSize = 10.sp)
+                Slider(
+                    value = layerOpacity,
+                    onValueChange = { layerOpacity = it },
+                    onValueChangeFinished = {
+                        val status = onUpdateLayer(activeLayer.id, null, null, null, layerOpacity)
+                        layerMessage = if (status == OperationStatus.COMMITTED) null else status.name
+                    },
+                    modifier = Modifier.weight(1f),
+                    valueRange = 0f..1f
+                )
+                Button(
+                    onClick = {
+                        val status = onRemoveLayer(activeLayer.id)
+                        layerMessage = when (status) {
+                            OperationStatus.COMMITTED -> null
+                            OperationStatus.DEPENDENCY_EXISTS -> "Move or remove this layer's strokes first."
+                            OperationStatus.INVALID_UNDO_TARGET -> "The starter layer cannot be removed this way."
+                            else -> status.name.lowercase().replace('_', ' ')
+                        }
+                    },
+                    enabled = layers.size > 1,
+                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 6.dp)
+                ) { Text("Remove", fontSize = 10.sp) }
+            }
+        }
+        if (layerMessage != null) {
+            Text(layerMessage.orEmpty(), color = Amber, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 14.dp))
+        }
         Box(
             Modifier.weight(1f).fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(18.dp)).border(1.dp, Line, RoundedCornerShape(18.dp))
         ) {
             SketchCanvas(
                 Modifier.fillMaxSize(),
                 strokes = strokes,
+                layers = layers,
+                activeLayerId = selectedLayerId,
+                canDraw = activeLayer != null && activeLayer.visible && !activeLayer.locked,
                 brushSize = brushSize,
                 panelCount = demoPanels,
                 eraser = tool == "Eraser",
@@ -510,6 +670,9 @@ private fun CreateWorkspace(
 private fun SketchCanvas(
     modifier: Modifier,
     strokes: List<InkStroke>,
+    layers: List<KuroLayer>,
+    activeLayerId: String,
+    canDraw: Boolean,
     brushSize: Float,
     panelCount: Int,
     eraser: Boolean,
@@ -518,41 +681,44 @@ private fun SketchCanvas(
     onStroke: (InkStroke) -> Unit
 ) {
     Canvas(
-        modifier.background(Color(0xFF111522)).pointerInput(brushSize, eraser) {
-            val canvasWidth = size.width.coerceAtLeast(1).toFloat()
-            val canvasHeight = size.height.coerceAtLeast(1).toFloat()
-            val minDimension = minOf(canvasWidth, canvasHeight).coerceAtLeast(1f)
-            fun normalized(point: Offset) = Offset(
-                (point.x / canvasWidth).coerceIn(0f, 1f),
-                (point.y / canvasHeight).coerceIn(0f, 1f)
-            )
-            var draft = emptyList<Offset>()
-            detectDragGestures(
-                onDragStart = { point ->
-                    draft = listOf(normalized(point))
-                    onLivePoints(draft)
-                },
-                onDragEnd = {
-                    if (draft.size > 1) onStroke(
-                        InkStroke(
-                            points = draft,
-                            color = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B),
-                            widthRatio = (if (eraser) brushSize * 3f else brushSize) / minDimension
+        modifier.background(Color(0xFF111522)).pointerInput(brushSize, eraser, activeLayerId, canDraw) {
+            if (canDraw) {
+                val canvasWidth = size.width.coerceAtLeast(1).toFloat()
+                val canvasHeight = size.height.coerceAtLeast(1).toFloat()
+                val minDimension = minOf(canvasWidth, canvasHeight).coerceAtLeast(1f)
+                fun normalized(point: Offset) = Offset(
+                    (point.x / canvasWidth).coerceIn(0f, 1f),
+                    (point.y / canvasHeight).coerceIn(0f, 1f)
+                )
+                var draft = emptyList<Offset>()
+                detectDragGestures(
+                    onDragStart = { point ->
+                        draft = listOf(normalized(point))
+                        onLivePoints(draft)
+                    },
+                    onDragEnd = {
+                        if (draft.size > 1) onStroke(
+                            InkStroke(
+                                points = draft,
+                                color = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B),
+                                widthRatio = (if (eraser) brushSize * 3f else brushSize) / minDimension,
+                                layerId = activeLayerId
+                            )
                         )
-                    )
-                    draft = emptyList()
-                    onLivePoints(emptyList())
-                },
-                onDragCancel = {
-                    draft = emptyList()
-                    onLivePoints(emptyList())
-                },
-                onDrag = { change, _ ->
-                    change.consume()
-                    draft = draft + normalized(change.position)
-                    onLivePoints(draft)
-                }
-            )
+                        draft = emptyList()
+                        onLivePoints(emptyList())
+                    },
+                    onDragCancel = {
+                        draft = emptyList()
+                        onLivePoints(emptyList())
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        draft = draft + normalized(change.position)
+                        onLivePoints(draft)
+                    }
+                )
+            }
         }
     ) {
         drawRect(Color(0xFF111522))
@@ -577,19 +743,29 @@ private fun SketchCanvas(
                 )
             }
         }
-        val previewColor = if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B)
-        val visibleStrokes = if (livePoints.isNotEmpty()) {
-            strokes + InkStroke(livePoints, previewColor, (if (eraser) brushSize * 3f else brushSize) / minOf(size.width, size.height).coerceAtLeast(1f))
-        } else {
-            strokes
+
+        val minDimension = minOf(size.width, size.height).coerceAtLeast(1f)
+        layers.filter { it.visible }.sortedBy { it.order }.forEach { layer ->
+            strokes.filter { it.layerId == layer.id }.forEach { stroke ->
+                val points = stroke.points.map { Offset(it.x * size.width, it.y * size.height) }
+                val width = (stroke.widthRatio * minDimension).coerceAtLeast(1f)
+                val color = stroke.color.copy(alpha = stroke.color.alpha * layer.opacity.coerceIn(0f, 1f))
+                if (points.size == 1) drawCircle(color, width / 2f, points.first())
+                for (pointIndex in 0 until points.lastIndex) {
+                    drawLine(color, points[pointIndex], points[pointIndex + 1], width, StrokeCap.Round)
+                }
+            }
         }
-        val minDimension = minOf(size.width, size.height)
-        visibleStrokes.forEach { stroke ->
-            val points = stroke.points.map { Offset(it.x * size.width, it.y * size.height) }
-            val width = (stroke.widthRatio * minDimension).coerceAtLeast(1f)
-            if (points.size == 1) drawCircle(stroke.color, width / 2f, points.first())
+
+        val activeLayer = layers.firstOrNull { it.id == activeLayerId }
+        if (canDraw && activeLayer != null && livePoints.isNotEmpty()) {
+            val previewColor = (if (eraser) Color(0xFFF5F1EA) else Color(0xFF25283B))
+                .copy(alpha = activeLayer.opacity.coerceIn(0f, 1f))
+            val points = livePoints.map { Offset(it.x * size.width, it.y * size.height) }
+            val width = ((if (eraser) brushSize * 3f else brushSize) / minDimension).coerceAtLeast(1f / minDimension) * minDimension
+            if (points.size == 1) drawCircle(previewColor, width / 2f, points.first())
             for (pointIndex in 0 until points.lastIndex) {
-                drawLine(stroke.color, points[pointIndex], points[pointIndex + 1], width, StrokeCap.Round)
+                drawLine(previewColor, points[pointIndex], points[pointIndex + 1], width, StrokeCap.Round)
             }
         }
     }

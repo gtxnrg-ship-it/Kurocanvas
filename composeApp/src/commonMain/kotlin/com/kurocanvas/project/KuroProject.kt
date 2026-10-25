@@ -26,12 +26,28 @@ data class KuroStrokePoint(
 )
 
 @Serializable
+data class KuroLayer(
+    val id: String,
+    val name: String,
+    val order: Int,
+    val visible: Boolean = true,
+    val locked: Boolean = false,
+    val opacity: Float = 1f,
+    val createdRevision: Long = 0L
+) {
+    companion object {
+        fun default() = KuroLayer(id = "layer-0001", name = "Layer 1", order = 0)
+    }
+}
+
+@Serializable
 data class KuroStroke(
     val id: String,
     val points: List<KuroStrokePoint>,
     val colorArgb: Int,
     /** Width as a fraction of the drawing area's shorter dimension. */
-    val widthRatio: Float
+    val widthRatio: Float,
+    val layerId: String = "layer-0001"
 )
 
 @Serializable
@@ -75,7 +91,8 @@ data class KuroProjectState(
     val strokes: List<KuroStroke> = emptyList(),
     val storyEntities: List<KuroStoryEntity> = emptyList(),
     val canonFacts: List<KuroCanonFact> = emptyList(),
-    val storyTitle: String = "Untitled story"
+    val storyTitle: String = "Untitled story",
+    val layers: List<KuroLayer> = listOf(KuroLayer.default())
 ) {
     companion object {
         fun empty(
@@ -91,7 +108,8 @@ data class KuroProjectState(
             strokes = emptyList(),
             storyEntities = emptyList(),
             canonFacts = emptyList(),
-            storyTitle = "Untitled story"
+            storyTitle = "Untitled story",
+            layers = listOf(KuroLayer.default())
         )
     }
 }
@@ -127,6 +145,34 @@ data class AddCanvasStroke(
 ) : KuroOperation
 
 data class UndoAddedCanvasStroke(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val targetOperationId: String,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class AddCanvasLayer(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val layer: KuroLayer,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UpdateCanvasLayer(
+    override val operationId: String,
+    override val projectId: String,
+    override val expectedRevision: Long,
+    val layerId: String,
+    val name: String? = null,
+    val visible: Boolean? = null,
+    val locked: Boolean? = null,
+    val opacity: Float? = null,
+    override val actor: String = "user"
+) : KuroOperation
+
+data class UndoAddedCanvasLayer(
     override val operationId: String,
     override val projectId: String,
     override val expectedRevision: Long,
@@ -171,7 +217,11 @@ enum class OperationStatus {
     MISSING_CANON_SUBJECT,
     CANON_CONTRADICTION,
     DEPENDENCY_EXISTS,
-    DUPLICATE_OBJECT_ID
+    DUPLICATE_OBJECT_ID,
+    INVALID_LAYER,
+    LAYER_NOT_FOUND,
+    LAYER_LOCKED,
+    LAYER_HIDDEN
 }
 
 data class KuroOperationResult(
@@ -221,6 +271,9 @@ class KuroOperationBroker {
             is UndoAddedStoryboardPanel -> undoAddedPanel(current, operation)
             is AddCanvasStroke -> addStroke(current, operation)
             is UndoAddedCanvasStroke -> undoAddedStroke(current, operation)
+            is AddCanvasLayer -> addCanvasLayer(current, operation)
+            is UpdateCanvasLayer -> updateCanvasLayer(current, operation)
+            is UndoAddedCanvasLayer -> undoAddedCanvasLayer(current, operation)
             is AddStoryEntity -> addStoryEntity(current, operation)
             is AddCanonFact -> addCanonFact(current, operation)
             is UndoAddedStoryItem -> undoStoryItem(current, operation)
@@ -326,10 +379,22 @@ class KuroOperationBroker {
         }
         if (current.strokes.any { it.id == stroke.id }) {
             return KuroOperationResult(
-                status = OperationStatus.DUPLICATE_OPERATION,
+                status = OperationStatus.DUPLICATE_OBJECT_ID,
                 project = current,
                 message = "A stroke with this ID already exists."
             )
+        }
+        val layer = current.layers.firstOrNull { it.id == stroke.layerId }
+            ?: return KuroOperationResult(
+                OperationStatus.LAYER_NOT_FOUND,
+                current,
+                "The target drawing layer does not exist."
+            )
+        if (layer.locked) {
+            return KuroOperationResult(OperationStatus.LAYER_LOCKED, current, "Unlock the selected layer before drawing.")
+        }
+        if (!layer.visible) {
+            return KuroOperationResult(OperationStatus.LAYER_HIDDEN, current, "Show the selected layer before drawing.")
         }
         val revision = current.revision + 1
         val next = current.copy(
@@ -591,5 +656,105 @@ class KuroOperationBroker {
             target.targetId
         )
     }
+
+    private fun addCanvasLayer(
+        current: KuroProjectState,
+        operation: AddCanvasLayer
+    ): KuroOperationResult {
+        val layer = operation.layer
+        if (layer.id.isBlank() || layer.name.isBlank() || !layer.opacity.isFinite() || layer.opacity !in 0f..1f) {
+            return KuroOperationResult(OperationStatus.INVALID_LAYER, current, "A layer needs a name and an opacity from 0 to 1.")
+        }
+        if (current.layers.any { it.id == layer.id }) {
+            return KuroOperationResult(OperationStatus.DUPLICATE_OBJECT_ID, current, "This layer ID already exists.")
+        }
+        val revision = current.revision + 1
+        val savedLayer = layer.copy(
+            name = layer.name.trim(),
+            order = (current.layers.maxOfOrNull { it.order } ?: -1) + 1,
+            createdRevision = revision
+        )
+        val next = current.copy(
+            revision = revision,
+            layers = current.layers + savedLayer,
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "add_canvas_layer",
+                targetId = savedLayer.id,
+                summary = "Added drawing layer: ${savedLayer.name}."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Drawing layer added.", savedLayer.id)
+    }
+
+    private fun updateCanvasLayer(
+        current: KuroProjectState,
+        operation: UpdateCanvasLayer
+    ): KuroOperationResult {
+        val existing = current.layers.firstOrNull { it.id == operation.layerId }
+            ?: return KuroOperationResult(OperationStatus.LAYER_NOT_FOUND, current, "The target drawing layer does not exist.")
+        if (operation.name != null && operation.name.isBlank()) {
+            return KuroOperationResult(OperationStatus.INVALID_LAYER, current, "A layer name cannot be blank.")
+        }
+        if (operation.opacity != null && (!operation.opacity.isFinite() || operation.opacity !in 0f..1f)) {
+            return KuroOperationResult(OperationStatus.INVALID_LAYER, current, "Layer opacity must be between 0 and 1.")
+        }
+        val revision = current.revision + 1
+        val updated = existing.copy(
+            name = operation.name?.trim() ?: existing.name,
+            visible = operation.visible ?: existing.visible,
+            locked = operation.locked ?: existing.locked,
+            opacity = operation.opacity ?: existing.opacity
+        )
+        val next = current.copy(
+            revision = revision,
+            layers = current.layers.map { if (it.id == updated.id) updated else it },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "update_canvas_layer",
+                targetId = updated.id,
+                summary = "Updated drawing layer properties."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Drawing layer updated.", updated.id)
+    }
+
+    private fun undoAddedCanvasLayer(
+        current: KuroProjectState,
+        operation: UndoAddedCanvasLayer
+    ): KuroOperationResult {
+        val target = current.auditLog.lastOrNull { it.operationId == operation.targetOperationId }
+        if (target == null || target.action != "add_canvas_layer") {
+            return KuroOperationResult(OperationStatus.INVALID_UNDO_TARGET, current, "This operation did not create a drawing layer.")
+        }
+        if (current.auditLog.any { it.action == "undo_add_canvas_layer" && it.targetId == target.targetId }) {
+            return KuroOperationResult(OperationStatus.ALREADY_UNDONE, current, "This drawing layer has already been removed.")
+        }
+        if (current.layers.size <= 1) {
+            return KuroOperationResult(OperationStatus.INVALID_UNDO_TARGET, current, "A project must keep at least one drawing layer.")
+        }
+        if (current.strokes.any { it.layerId == target.targetId }) {
+            return KuroOperationResult(OperationStatus.DEPENDENCY_EXISTS, current, "This layer still contains strokes. Remove or move them first.")
+        }
+        val revision = current.revision + 1
+        val next = current.copy(
+            revision = revision,
+            layers = current.layers.filterNot { it.id == target.targetId },
+            auditLog = current.auditLog + KuroAuditEvent(
+                operationId = operation.operationId,
+                revision = revision,
+                actor = operation.actor,
+                action = "undo_add_canvas_layer",
+                targetId = target.targetId,
+                summary = "Undid creation of drawing layer."
+            )
+        )
+        return KuroOperationResult(OperationStatus.COMMITTED, next, "Drawing layer removed.", target.targetId)
+    }
+
 
 }
