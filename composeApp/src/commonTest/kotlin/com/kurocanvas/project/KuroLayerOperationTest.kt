@@ -39,7 +39,7 @@ class KuroLayerOperationTest {
         assertEquals(false, layer.visible)
         assertEquals(true, layer.locked)
         assertEquals(0.35f, layer.opacity)
-        assertEquals(3L, update.project.revision)
+        assertEquals(2L, update.project.revision)
     }
 
     @Test
