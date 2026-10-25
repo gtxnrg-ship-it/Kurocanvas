@@ -17,7 +17,7 @@ jobs:
   verify:
     name: Verify Android + desktop
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -33,12 +33,12 @@ jobs:
 
       - name: Install Android platform and build tools
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "platforms;android-37" "build-tools;36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.14.4'
+          gradle-version: '9.3.1'
 
       - name: Run project model tests
         run: gradle :composeApp:desktopTest
@@ -47,12 +47,12 @@ jobs:
         run: gradle :composeApp:compileKotlinDesktop
 
       - name: Assemble Android debug APK
-        run: gradle :composeApp:assembleDebug
+        run: gradle :androidApp:assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v6
         with:
           name: kuro-canvas-android-debug
-          path: composeApp/build/outputs/apk/debug/*.apk
+          path: androidApp/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7

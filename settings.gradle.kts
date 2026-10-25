@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "KuroCanvas"
-include(":composeApp")
+include(":composeApp", ":androidApp")
