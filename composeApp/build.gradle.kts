@@ -31,7 +31,11 @@ kotlin {
             }
         }
 
-        val androidMain by getting
+        val androidMain by getting {
+            dependencies {
+                implementation("androidx.activity:activity-compose:${libs.versions.activityCompose.get()}")
+            }
+        }
 
         val desktopMain by getting {
             dependencies {

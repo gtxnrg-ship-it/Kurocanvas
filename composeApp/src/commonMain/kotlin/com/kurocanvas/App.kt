@@ -29,6 +29,10 @@ import androidx.compose.ui.unit.sp
 import com.kurocanvas.project.AddCanonFact
 import com.kurocanvas.project.AddCanvasStroke
 import com.kurocanvas.project.AddStoryEntity
+import com.kurocanvas.project.KuroPlatformAssetImportButton
+import com.kurocanvas.project.KuroVaultAsset
+import com.kurocanvas.project.KuroVaultIndex
+import com.kurocanvas.project.createKuroVaultStorage
 import com.kurocanvas.project.AddStoryboardPanel
 import com.kurocanvas.project.KuroOperationBroker
 import com.kurocanvas.project.KuroCanonFact
@@ -92,6 +96,35 @@ fun App(storageRoot: String) {
     var showKuro by remember { mutableStateOf(false) }
     val projectStorage = remember(storageRoot) { createKuroProjectStorage(storageRoot) }
     val initialLoad = remember(projectStorage) { projectStorage.load() }
+    val vaultStorage = remember(storageRoot) { createKuroVaultStorage(storageRoot) }
+    val initialVaultLoad = remember(vaultStorage) { vaultStorage.load() }
+    var vaultIndex by remember(vaultStorage) { mutableStateOf(initialVaultLoad.index) }
+    var vaultWarning by remember(vaultStorage) { mutableStateOf(initialVaultLoad.warning) }
+    var vaultMessage by remember(vaultStorage) { mutableStateOf<String?>(null) }
+    val vaultWritesAllowed = vaultWarning == null
+    val onVaultImportResult: (KuroVaultAsset?, String?) -> Unit = { asset, error ->
+        if (error != null) {
+            vaultMessage = error
+        } else if (asset != null && vaultWritesAllowed) {
+            if (vaultIndex.assets.any { it.id == asset.id }) {
+                vaultMessage = "Already in your Vault. Matching file content was deduplicated by SHA-256."
+            } else {
+                val nextIndex = vaultIndex.copy(
+                    assets = (vaultIndex.assets + asset).sortedBy { it.name.lowercase() }
+                )
+                val saved = vaultStorage.save(nextIndex)
+                if (saved.success) {
+                    vaultIndex = nextIndex
+                    vaultMessage = "Imported ${asset.name}. License status is unreviewed; verify rights before redistribution."
+                } else {
+                    vaultWarning = saved.message
+                    vaultMessage = saved.message
+                }
+            }
+        } else if (asset != null) {
+            vaultMessage = "The Vault index needs repair. Import was not indexed, and the existing index was preserved."
+        }
+    }
     var project by remember(projectStorage) {
         mutableStateOf(initialLoad.state ?: KuroProjectState.empty())
     }
@@ -281,7 +314,7 @@ fun App(storageRoot: String) {
                                 }
                             )
                             Section.Story -> StoryWorkspace(project, addStoryCharacter, addCanonFact)
-                            Section.Vault -> VaultWorkspace()
+                            Section.Vault -> VaultWorkspace(vaultIndex, vaultWarning, vaultMessage, storageRoot, vaultWritesAllowed, onVaultImportResult)
                             Section.Style -> PlannedWorkspace("Style Lab", "Define linework, anatomy, palette, rendering and lettering as versioned Style DNA. Preview changes before approval.", "◉")
                             Section.ThreeD -> PlannedWorkspace("3D Studio", "Reusable glTF/GLB assets, real 3D viewports, rigs, cameras, lighting and animation will remain editable project data.", "◇")
                             Section.Research -> PlannedWorkspace("Research", "Keep sources, claims, contradictions and provenance linked. Research stays a proposal until you approve it.", "⌕")
@@ -777,19 +810,109 @@ private fun StoryWorkspace(
 }
 
 @Composable
-private fun VaultWorkspace() {
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(15.dp)) {
-        Text("Vault", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-        Text("One identity, many reusable representations and variants.", color = MutedText, fontSize = 13.sp)
-        Surface(color = Panel, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
-            Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Box(Modifier.size(72.dp).clip(RoundedCornerShape(24.dp)).background(Brush.linearGradient(listOf(Color(0xFF2A2543), Color(0xFF173442)))), contentAlignment = Alignment.Center) {
-                    Text("◈", color = Cyan, fontSize = 30.sp)
+private fun VaultWorkspace(
+    index: KuroVaultIndex,
+    warning: String?,
+    message: String?,
+    storageRoot: String,
+    importEnabled: Boolean,
+    onImported: (KuroVaultAsset?, String?) -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val visibleAssets = index.assets.filter { asset ->
+        query.isBlank() ||
+            asset.name.contains(query, ignoreCase = true) ||
+            asset.kind.name.contains(query, ignoreCase = true) ||
+            asset.tags.any { it.contains(query, ignoreCase = true) }
+    }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(15.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Vault", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                Text("A reusable local asset library with provenance and license tracking.", color = MutedText, fontSize = 12.sp)
+            }
+            StatusPill("${index.assets.size} ASSETS", Cyan)
+        }
+        Surface(color = Panel, shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("IMPORT ASSET", color = MutedText, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                Text("Bring a local file into your Vault", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Files are copied into Kuro Canvas app storage, identified by SHA-256, and indexed locally. Import does not upload them anywhere.",
+                    color = MutedText,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                KuroPlatformAssetImportButton(
+                    rootPath = storageRoot,
+                    enabled = importEnabled,
+                    onResult = onImported
+                )
+                if (warning != null) {
+                    Text(warning, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
                 }
-                Spacer(Modifier.height(18.dp))
-                Text("Your Vault is empty", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                Text("Saved characters, outfits, poses, props, environments, 3D models, brushes and templates will appear here. This prototype has not generated or downloaded assets.", color = MutedText, fontSize = 12.sp, lineHeight = 18.sp)
+                if (message != null) {
+                    Text(message, color = if (message.contains("unreviewed", ignoreCase = true)) Amber else MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                }
+                Text(
+                    "Imported assets default to UNREVIEWED license status. Confirm the source, license, attribution and redistribution rights before sharing or publishing them.",
+                    color = Amber,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+
+        if (index.assets.isEmpty()) {
+            Surface(color = Panel, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(9.dp)
+                ) {
+                    Box(
+                        Modifier.size(66.dp).clip(RoundedCornerShape(22.dp))
+                            .background(Brush.linearGradient(listOf(Color(0xFF2A2543), Color(0xFF173442)))),
+                        contentAlignment = Alignment.Center
+                    ) { Text("◈", color = Cyan, fontSize = 28.sp) }
+                    Text("Your Vault is empty", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Imported characters, outfits, poses, props, environments, 3D models, brushes, textures and templates will be listed here. Nothing is generated or downloaded automatically.",
+                        color = MutedText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        } else {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Search Vault by name, type or tag") },
+                singleLine = true
+            )
+            Text("${visibleAssets.size} matching asset(s)", color = MutedText, fontSize = 11.sp)
+            visibleAssets.forEach { asset ->
+                Surface(color = Panel, shape = RoundedCornerShape(15.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(asset.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                Text(asset.kind.name.lowercase().replace('_', ' '), color = MutedText, fontSize = 10.sp)
+                            }
+                            StatusPill(if (asset.licenseId == "UNREVIEWED") "LICENSE REVIEW" else asset.licenseId, if (asset.licenseId == "UNREVIEWED") Amber else Green)
+                        }
+                        Text("${asset.mimeType} • ${(asset.byteSize / 1024).coerceAtLeast(1)} KB", color = MutedText, fontSize = 10.sp)
+                        Text("Path: ${asset.relativePath}", color = MutedText, fontSize = 10.sp)
+                        Text("SHA-256: ${asset.sha256}", color = MutedText, fontSize = 9.sp)
+                        if (asset.tags.isNotEmpty()) Text(asset.tags.joinToString(" · "), color = Cyan, fontSize = 10.sp)
+                    }
+                }
             }
         }
     }
