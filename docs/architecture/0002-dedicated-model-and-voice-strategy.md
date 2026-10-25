@@ -1,6 +1,8 @@
 # Architecture 0002: Dedicated local model and voice strategy
 
-Status: proposed. Model weights are deliberately not selected until the tool-use benchmark and license review exist.
+Status: initial prototype integrated; production model selection is not final. Android and desktop builds, model tests and APK packaging pass CI. Representative-device inference quality, memory use, latency and thermal behavior still require measurement.
+
+The current prototype pins a Qwen3 0.6B LiteRT-LM artifact with source, Apache-2.0 license reference, size and SHA-256 in the model manifest. The app can download/resume, verify, load and use it for local streaming chat. The allowlisted native-action path currently supports a storyboard panel, a story entity and one time-scoped canon fact; each proposal requires user approval and is validated by the operation broker. This is not yet a general-purpose tool-using agent.
 
 ## Product decision
 
@@ -10,19 +12,13 @@ Kuro is a tool-using creative operator, not an image generator. A language model
 
 ## Runtime interfaces
 
-Define KuroModelRuntime with methods equivalent to:
-- load(modelManifest, deviceProfile)
-- unload()
-- streamTurn(context, toolSchemas, cancellationToken)
-- cancelTurn(turnId)
-- healthAndCapabilities()
-- memoryEstimate()
-- runtimeDiagnostics()
-- dispose()
+The initial KuroLocalModelRuntime interface currently supports load(modelPath), unload(), and streaming generate(systemInstruction, userPrompt). The following remain desired runtime capabilities rather than completed features: device-profile-aware loading, turn cancellation, health/capability reporting, memory estimates, runtime diagnostics, disposal and a canonical event stream distinguishing text, tool proposal, clarification request, progress, refusal/error and final response.
 
-A provider adapter converts each inference backend's messages/tool calls into a canonical Kuro event stream. Model response kinds should distinguish text, tool proposal, request for missing information, progress update, refusal/error, and final response.
+The current action parser is deliberately stricter than generic function calling: only the three implemented action schemas are accepted, and none executes without user approval.
 
-Initial candidates:
+Current prototype runtime: [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM), using the pinned Qwen3 0.6B artifact in the app model catalog. This is a starter integration, not a final quality or hardware decision.
+
+Alternative candidates for comparative testing:
 - [llama.cpp](https://github.com/ggml-org/llama.cpp): first local inference proof of concept; GGUF quantization, CPU/GPU options, constrained JSON and function/tool calling. Evaluate actual target-device performance and the model's chat template.
 - [MLC LLM](https://github.com/mlc-ai/mlc-llm): alternate adapter for compiled deployment and hardware acceleration, especially where Android GPU paths perform better. It adds compilation/model-packaging complexity and must not be assumed faster on every device.
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): separate speech runtime, not the language model.
