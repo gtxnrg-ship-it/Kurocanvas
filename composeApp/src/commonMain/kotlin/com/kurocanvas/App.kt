@@ -258,6 +258,38 @@ fun App(storageRoot: String) {
                     result.status
                 }
             }
+            KuroNativeActionType.ADD_CANON_FACT -> {
+                val subjectId = proposal.subjectId
+                val predicate = proposal.predicate
+                val value = proposal.value
+                val fromChapter = proposal.fromChapter
+                val branchId = proposal.branchId
+                if (subjectId.isNullOrBlank() || predicate.isNullOrBlank() || value.isNullOrBlank() ||
+                    fromChapter == null || branchId.isNullOrBlank()
+                ) {
+                    OperationStatus.INVALID_CANON_FACT
+                } else {
+                    val revision = project.revision + 1
+                    val operation = AddCanonFact(
+                        operationId = "op-kuro-add-canon-$revision",
+                        projectId = project.projectId,
+                        expectedRevision = project.revision,
+                        fact = KuroCanonFact(
+                            id = "fact-$revision",
+                            subjectId = subjectId,
+                            predicate = predicate,
+                            value = value,
+                            branchId = branchId,
+                            fromChapter = fromChapter,
+                            untilChapterExclusive = proposal.untilChapterExclusive
+                        ),
+                        actor = "kuro-approved-by-user"
+                    )
+                    val result = operationBroker.execute(project, operation)
+                    if (result.status == OperationStatus.COMMITTED) commitProject(result.project)
+                    result.status
+                }
+            }
         }
     }
     val undoLastStoryboardPanel: () -> Unit = {
@@ -2046,6 +2078,8 @@ private fun KuroPanel(
                                     "Nothing has changed yet. Approving this will add one storyboard panel to the current project and save it."
                                 KuroNativeActionType.ADD_STORY_ENTITY ->
                                     "Nothing has changed yet. Approving this will add a ${pendingAction.entityType?.name?.lowercase()?.replace('_', ' ')} named ${pendingAction.entityName} to the story graph and save it."
+                                KuroNativeActionType.ADD_CANON_FACT ->
+                                    "Nothing has changed yet. Approving this will record ${pendingAction.predicate}: ${pendingAction.value} for ${pendingAction.subjectId}, chapters ${pendingAction.fromChapter}–${pendingAction.untilChapterExclusive?.minus(1) ?: "ongoing"} on branch ${pendingAction.branchId}."
                             },
                             color = MutedText,
                             fontSize = 10.sp,
@@ -2122,7 +2156,7 @@ private fun KuroPanel(
             DividerLine()
             Text("Native project action", color = PrimaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "Kuro can propose adding a storyboard panel or a story entity. Every proposal is validated, revision-checked and only applied after you approve it.",
+                "Kuro can propose adding a storyboard panel, a story entity, or one time-scoped canon fact. Every proposal is validated, revision-checked and only applied after you approve it.",
                 color = MutedText,
                 fontSize = 10.sp,
                 lineHeight = 15.sp

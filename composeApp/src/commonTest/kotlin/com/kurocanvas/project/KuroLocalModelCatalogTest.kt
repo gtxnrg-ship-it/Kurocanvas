@@ -101,6 +101,36 @@ class KuroLocalModelCatalogTest {
     }
 
     @Test
+    fun nativeActionParserAcceptsTimeScopedCanonFactProposal() {
+        val parsed = KuroNativeActionParser.parse(
+            """{"kuro_action":{"type":"add_canon_fact","summary":"Set Mira's hair to black","subject_id":"entity-3","predicate":"Hair color","value":"Black","from_chapter":1,"until_chapter_exclusive":null,"branch_id":"main"}}"""
+        )
+        assertEquals(KuroNativeActionType.ADD_CANON_FACT, parsed?.type)
+        assertEquals("entity-3", parsed?.subjectId)
+        assertEquals("Hair color", parsed?.predicate)
+        assertEquals("Black", parsed?.value)
+        assertEquals(1, parsed?.fromChapter)
+        assertEquals(null, parsed?.untilChapterExclusive)
+        assertEquals("main", parsed?.branchId)
+    }
+
+    @Test
+    fun nativeActionParserRejectsInvalidCanonIntervalsAndUnknownEntitiesAreNotResolvedHere() {
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_canon_fact","summary":"Bad range","subject_id":"entity-3","predicate":"Age","value":"18","from_chapter":8,"until_chapter_exclusive":4,"branch_id":"main"}}"""
+            )
+        )
+        assertEquals(
+            null,
+            KuroNativeActionParser.parse(
+                """{"kuro_action":{"type":"add_canon_fact","summary":"Bad chapter","subject_id":"entity-3","predicate":"Age","value":"18","from_chapter":0,"until_chapter_exclusive":null,"branch_id":"main"}}"""
+            )
+        )
+    }
+
+    @Test
     fun progressPercentageIsBoundedAndHandlesUnknownTotal() {
         assertEquals(50, KuroModelDownloadProgress(50, 100).percent)
         assertEquals(0, KuroModelDownloadProgress(10, 0).percent)
